@@ -37,33 +37,33 @@ shorter](https://en.cppreference.com/w/cpp/language/namespace_alias) or put
 ## Building docs & examples
 
 To build the Doxygen documentation and examples:
-```
+```sh
 meson build
 ninja -C build # for examples
 ninja -C build docs # for docs
-```sh
+```
 
 ## Usage
 
 1. Create your component types. Any type can be used as a component!
-```
+```cpp
 struct health
 {
     int hit_points;
 };
-```cpp
+```
 
 2. Create some event types. Any type can be used as an event!
-```
+```cpp
 struct hit_event
 {
     monkero::entity damaged_entity;
     int damage;
 };
-```cpp
+```
 
 3. Create a system & list emitted and received events!
-```
+```cpp
 class health_system:
     public monkero::system,
     public monkero::receiver<hit_event>
@@ -88,10 +88,10 @@ public:
         });
     }
 };
-```cpp
+```
 
 4. Add entities, components and systems to the ECS instance!
-```
+```cpp
 monkero::ecs ecs;
 
 ecs.add_system<health_system>();
@@ -108,7 +108,7 @@ while(main_loop)
     gas.tick(ecs);
     //...
 }
-```cpp
+```
 
 Advanced usage examples of components, systems and events can be found in the
 `examples` folder along with a complete usage example of the system as a whole.
