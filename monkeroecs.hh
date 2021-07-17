@@ -529,12 +529,13 @@ private:
 
     void resolve_pending();
 
+    template<typename Component>
+    static size_t get_type_key();
+    inline static size_t type_key_counter = 0;
+
     entity id_counter;
     int defer_batch;
-    mutable std::unordered_map<
-        std::size_t /*component type hash*/,
-        std::unique_ptr<component_container_base>
-    > components;
+    mutable std::vector<std::unique_ptr<component_container_base>> components;
     struct system_data
     {
         std::unique_ptr<system> ptr;
@@ -847,10 +848,10 @@ System& ecs::add_system(Args&&... args)
         sys_connect_all_receivers(*this);
 
     // Connect component container emitters
-    for(auto& pair: components)
+    for(auto& container: components)
     {
-        if(sys_connect_all_receivers)
-            sys_connect_all_receivers(*pair.second);
+        if(sys_connect_all_receivers && container)
+            sys_connect_all_receivers(*container);
     }
 
     // Connect the new system to all other systems.
@@ -881,7 +882,7 @@ System& ecs::ensure_system()
 void ecs::remove(entity id)
 {
     for(auto& c: components)
-        c.second->remove(*this, id);
+        if(c) c->remove(*this, id);
 }
 
 template<typename Component>
@@ -893,7 +894,7 @@ void ecs::remove(entity id)
 void ecs::clear_entities()
 {
     for(auto& c: components)
-        c.second->clear(*this);
+        if(c) c->clear(*this);
     id_counter = 0;
 }
 
@@ -1344,8 +1345,10 @@ size_t ecs::component_container<Component>::count() const
 template<typename Component>
 ecs::component_container<Component>& ecs::get_container() const
 {
-    auto& base_ptr = components[typeid(Component).hash_code()];
-    if(!base_ptr)
+    size_t key = get_type_key<Component>();
+    if(components.size() <= key) components.resize(key+1);
+    auto& base_ptr = components[key];
+    if(!base_ptr) 
     {
         base_ptr.reset(new component_container<Component>());
 
@@ -1365,7 +1368,14 @@ ecs::component_container<Component>& ecs::get_container() const
 void ecs::resolve_pending()
 {
     for(auto& c: components)
-        c.second->resolve_pending();
+        if(c) c->resolve_pending();
+}
+
+template<typename Component>
+size_t ecs::get_type_key()
+{
+    static size_t key = type_key_counter++;
+    return key;
 }
 
 template<typename... DependencyComponents>

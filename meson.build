@@ -36,3 +36,10 @@ executable(
   include_directories: [incdir],
   install: true,
 )
+
+executable(
+  'bench',
+  files('examples/benchmark.cc'),
+  include_directories: [incdir],
+  install: true,
+)
