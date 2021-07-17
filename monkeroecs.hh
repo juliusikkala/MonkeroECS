@@ -50,10 +50,7 @@ SOFTWARE.
 #ifndef MONKERO_ECS_HH
 #define MONKERO_ECS_HH
 #include <functional>
-#include <typeinfo>
-#include <typeindex>
 #include <type_traits>
-#include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
 #include <limits>
@@ -480,7 +477,6 @@ private:
         typename std::vector<
             typename Container::component_data
         >::iterator end;
-        bool dense;
     };
 
     template<typename Component>
@@ -591,7 +587,7 @@ ecs::~ecs()
 
 template<typename Component>
 ecs::foreach_iterator_base<Component>::foreach_iterator_base(Container& c)
-: begin(c.components.begin()), end(c.components.end()), dense(false)
+: begin(c.components.begin()), end(c.components.end())
 {
 }
 
@@ -612,10 +608,7 @@ void ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
     if(begin == end || begin->id >= id) return;
 
-    if(dense) begin = std::lower_bound(
-        begin, std::min(end, begin + (id - begin->id)), id
-    );
-    else while(begin != end && begin->id < id) begin++;
+    begin = std::lower_bound(begin+1, std::min(end, begin + (id - begin->id)), id);
 }
 
 template<typename Component>
@@ -673,11 +666,6 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
     }
     else
     {
-        ssize_t max_iterations = monkero_apply_tuple(std::min({
-            (it.required ? it.end - it.begin :
-             std::numeric_limits<entity>::max())...
-        }));
-        monkero_apply_tuple((it.dense = it.end - it.begin > max_iterations*8), ...);
         while(monkero_apply_tuple((!it.finished() || !it.required) && ...))
         {
             entity cur_id = monkero_apply_tuple(
@@ -1243,10 +1231,9 @@ void ecs::component_container<Component>::resolve_pending()
         )
     ){  // Fast route, only used when all additions are after the last
         // already-extant entity.
-        components.reserve(std::max(
-            components.size() * 2,
-            components.size() + pending_addition.size()
-        ));
+        size_t needed_size = components.size() + pending_addition.size();
+        if(components.capacity() < needed_size)
+            components.reserve(std::max(components.capacity() * 2, needed_size));
         for(component_data& d: pending_addition)
             components.emplace_back(std::move(d));
         pending_addition.clear();
