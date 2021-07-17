@@ -1242,7 +1242,10 @@ void ecs::component_container<Component>::resolve_pending()
         )
     ){  // Fast route, only used when all additions are after the last
         // already-extant entity.
-        components.reserve(components.size() + pending_addition.size());
+        components.reserve(std::max(
+            components.size() * 2,
+            components.size() + pending_addition.size()
+        ));
         for(component_data& d: pending_addition)
             components.emplace_back(std::move(d));
         pending_addition.clear();
@@ -1326,7 +1329,6 @@ void ecs::component_container<Component>::clear(ecs& ctx)
         // The most difficult case, we don't batch but we still need to emit.
         std::vector<component_data> tmp(std::move(components));
         components.clear();
-        components.reserve(tmp.capacity());
 
         for(component_data& d: tmp)
             emit(ctx, remove_component<Component>{d.id, d.get()});

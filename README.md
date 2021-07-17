@@ -105,7 +105,7 @@ ecs.add(health{50});
 while(main_loop)
 {
     //...
-    gas.tick();
+    gas.tick(ecs);
     //...
 }
 ```cpp
