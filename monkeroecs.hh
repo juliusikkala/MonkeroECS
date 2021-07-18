@@ -50,10 +50,8 @@ SOFTWARE.
 #ifndef MONKERO_ECS_HH
 #define MONKERO_ECS_HH
 #include <functional>
-#include <type_traits>
 #include <unordered_set>
 #include <algorithm>
-#include <limits>
 #include <vector>
 #include <memory>
 #include <tuple>
@@ -222,13 +220,13 @@ public:
      *   present.
      */
     template<typename F>
-    void foreach(F&& f);
+    inline void foreach(F&& f);
 
     /** Same as foreach(), just syntactic sugar.
      * \see foreach()
      */
     template<typename F>
-    void operator()(F&& f);
+    inline void operator()(F&& f);
 
     /** Reserves space for components.
      * Using this function isn't mandatory, but it can be used to improve
@@ -468,8 +466,7 @@ private:
         foreach_iterator_base(Container& c);
 
         bool finished();
-        void advance();
-        void advance_up_to(entity id);
+        inline void advance_up_to(entity id);
         void id();
         typename std::vector<
             typename Container::component_data
@@ -506,7 +503,7 @@ private:
     struct foreach_impl
     {
         template<typename F>
-        static void call(ecs& ctx, F&& f);
+        static inline void call(ecs& ctx, F&& f);
     };
 
     template<typename... Components>
@@ -598,17 +595,10 @@ bool ecs::foreach_iterator_base<Component>::finished()
 }
 
 template<typename Component>
-void ecs::foreach_iterator_base<Component>::advance()
-{
-    if(begin != end) begin++;
-}
-
-template<typename Component>
 void ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
-    if(begin == end || begin->id >= id) return;
-
-    begin = std::lower_bound(begin+1, std::min(end, begin + (id - begin->id)), id);
+    auto last = std::min(end, begin + (id - begin->id));
+    begin = std::lower_bound(begin + 1, last, id);
 }
 
 template<typename Component>
@@ -643,9 +633,23 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
 #define monkero_apply_tuple(...) \
     std::apply([&](auto&... it){return (__VA_ARGS__);}, component_it)
 
+    // Note that all checks based on it.required are compile-time, it's
+    // constexpr!
     constexpr bool all_optional = monkero_apply_tuple(!it.required && ...);
 
-    if constexpr(all_optional)
+    if constexpr(sizeof...(Components) == 1)
+    {
+        // If we're only iterating one category, we can do it very quickly!
+        auto& iter = std::get<0>(component_it);
+        while(!iter.finished())
+        {
+            entity cur_id = iter.begin->id;
+            if constexpr(pass_id) f(cur_id, *iter.begin);
+            else f(*iter.begin);
+            ++iter.begin;
+        }
+    }
+    else if constexpr(all_optional)
     {
         // If all are optional, iteration logic has to differ a bit. The other
         // version would never quit as there would be zero finished required
@@ -666,6 +670,8 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
     }
     else
     {
+        // This is the generic implementation for when there's multiple
+        // components where some are potentially optional.
         while(monkero_apply_tuple((!it.finished() || !it.required) && ...))
         {
             entity cur_id = monkero_apply_tuple(
@@ -674,18 +680,18 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
             // Check if all entries have the same id. For each entry that
             // doesn't, advance to the next id.
             bool all_required_equal = monkero_apply_tuple(
-                (it.begin != it.end && it.begin->id == cur_id ? true :
-                 (it.advance_up_to(cur_id), !it.required)) && ...
+                (it.required ?
+                    (it.begin->id == cur_id ?
+                        true : (it.advance_up_to(cur_id), false)) : 
+                    (it.begin != it.end && it.begin->id >= cur_id ?
+                        true : (it.advance_up_to(cur_id), true))) && ...
             );
             if(all_required_equal)
             {
                 if constexpr(pass_id)
                     monkero_apply_tuple(f(cur_id, it.get(cur_id)...));
                 else monkero_apply_tuple(f(it.get(cur_id)...));
-                monkero_apply_tuple(
-                    (it.begin != it.end && it.begin->id == cur_id ?
-                     ++it.begin, void() : void()), ...
-                );
+                monkero_apply_tuple((it.required ? ++it.begin, void(): void()), ...);
             }
         }
     }

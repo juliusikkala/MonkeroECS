@@ -6,23 +6,20 @@ engine project.
 
 Features:
 - No entity count limits (other than 32-bit entity index)
-- Only standard library 
+- Only depends on standard library 
 - Events
 - Dependencies
   - Components can depend on systems and other components which will be added
     automatically if not present already
 - Flexible but simple-to-use foreach
-  - Iterates over one or more component types simultaneously, some can be
-    optional
-- Generally linear iteration time
+- Efficient multi-component iteration
 - Memory-efficient handling of tag components
 - Batched modification
-- Only depends on the standard library
 
 In the interest of saving your time, here's a list of common game dev deal-breakers:
 - No tests included (for now)
 - Uses RTTI (not in components though) & STL & lots of templates
-- Lots of potentially slow-to-include standard library headers
+- Some potentially slow-to-include standard library headers
 - Looking up individual components by entity id is logarithmic
 - Thread-oblivious
 
