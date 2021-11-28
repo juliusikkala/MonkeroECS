@@ -85,7 +85,7 @@ class system
 {
 public:
     /** An empty destructor that creates the vtable. */
-    virtual ~system();
+    virtual ~system() = default;
 };
 
 /** A built-in event emitted when a component is added to the ECS. */
@@ -200,12 +200,12 @@ class ecs: public system
 {
 public:
     /** The constructor. */
-    ecs();
+    inline ecs();
     /** The destructor.
      * It ensures that all remove_component events are sent for the remainder
      * of the components before systems are cleared.
      */
-    ~ecs();
+    inline ~ecs();
 
     /** Calls a given function for all suitable entities.
      * The parameters of the function mandate how it is called. Batching is
@@ -242,7 +242,7 @@ public:
      * counter.
      * \return The new entity ID.
      */
-    entity add();
+    inline entity add();
 
     /** Adds an entity with initial components.
      * Takes a list of component instances. Note that they must be moved in, so
@@ -268,7 +268,7 @@ public:
      * entity again by calling attach() for it.
      * \param id The entity whose components to remove.
      */
-    void remove(entity id);
+    inline void remove(entity id);
 
     /** Removes a component of an entity.
      * \tparam Component The type of component to remove from the entity.
@@ -281,7 +281,7 @@ public:
      * It also resets the entity counter, so this truly invalidates all
      * previous entities!
      */
-    void clear_entities();
+    inline void clear_entities();
 
     /** Creates a system in the ECS.
      * The system is created in-place. Event receivers and emitters are
@@ -302,7 +302,7 @@ public:
     System& ensure_system();
 
     /** Removes all systems.  */
-    void clear_systems();
+    inline void clear_systems();
 
     /** Starts batching behaviour for add/remove.
      * If you know you are going to do a lot of modifications to existing
@@ -312,13 +312,13 @@ public:
      * couple of modifications, don't bother. Also, if you are within a foreach
      * loop, batching will already be applied.
      */
-    void start_batch();
+    inline void start_batch();
 
     /** Finishes batching behaviour for add/remove and applies the changes.
      * Some batched changes take place immediately, but many are not. After
      * calling finish_batch(), all functions act like you would expect.
      */
-    void finish_batch();
+    inline void finish_batch();
 
     /** Counts instances of entities with a specified component.
      * \tparam Component the component type to count instances of.
@@ -373,12 +373,12 @@ private:
     class component_container_base: public system
     {
     public:
-        virtual ~component_container_base();
+        virtual ~component_container_base() = default;
 
-        virtual void resolve_pending() = 0;
-        virtual void remove(ecs& ctx, entity id) = 0;
-        virtual void clear(ecs& ctx) = 0;
-        virtual size_t count() const = 0;
+        inline virtual void resolve_pending() = 0;
+        inline virtual void remove(ecs& ctx, entity id) = 0;
+        inline virtual void clear(ecs& ctx) = 0;
+        inline virtual size_t count() const = 0;
     };
 
     template<typename Component>
@@ -520,7 +520,7 @@ private:
     template<typename Component>
     component_container<Component>& get_container() const;
 
-    void resolve_pending();
+    inline void resolve_pending();
 
     template<typename Component>
     static size_t get_type_key();
@@ -568,8 +568,6 @@ public:
 // Implementation
 //==============================================================================
 
-system::~system() {}
-
 ecs::ecs()
 : id_counter(0), defer_batch(0)
 {
@@ -597,7 +595,7 @@ bool ecs::foreach_iterator_base<Component>::finished()
 template<typename Component>
 void ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
-    auto last = std::min(end, begin + (id - begin->id));
+    auto last = begin + std::min(entity(end - begin), (id - begin->id));
     begin = std::lower_bound(begin + 1, last, id);
 }
 
@@ -644,8 +642,8 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
         while(!iter.finished())
         {
             entity cur_id = iter.begin->id;
-            if constexpr(pass_id) f(cur_id, *iter.begin);
-            else f(*iter.begin);
+            if constexpr(pass_id) f(cur_id, iter.get(cur_id));
+            else f(iter.get(cur_id));
             ++iter.begin;
         }
     }
@@ -683,7 +681,7 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
                 (it.required ?
                     (it.begin->id == cur_id ?
                         true : (it.advance_up_to(cur_id), false)) : 
-                    (it.begin != it.end && it.begin->id >= cur_id ?
+                    (it.begin == it.end || it.begin->id >= cur_id ?
                         true : (it.advance_up_to(cur_id), true))) && ...
             );
             if(all_required_equal)
@@ -901,10 +899,6 @@ template<typename Component>
 void ecs::reserve(size_t count)
 {
     get_container<Component>().reserve(count);
-}
-
-ecs::component_container_base::~component_container_base()
-{
 }
 
 template<typename Component>
@@ -1375,7 +1369,7 @@ template<typename... DependencyComponents>
 void dependency_components<DependencyComponents...>::
 ensure_dependency_components_exist(entity id, ecs& ctx)
 {
-    (ctx.attach(id, DependencyComponents()), ...);
+    ((ctx.has<DependencyComponents>(id) ? void() : ctx.attach(id, DependencyComponents())), ...);
 }
 
 template<typename... DependencySystems>
@@ -1461,3 +1455,4 @@ void event_emitter<EventType>::subscribe(event_receiver<EventType>& s)
 }
 
 #endif
+
