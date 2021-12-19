@@ -58,7 +58,6 @@ public:
 // mark which event types your class deals with.
 class mysystem:
     public monkero::system,
-    public monkero::emitter<yourevent, thirdevent>,
     public monkero::receiver<myevent>
 {
 public:
@@ -68,7 +67,7 @@ public:
     {
         // This sends an event to all interested systems.
         // You can only emit types that you have listed in emitter.
-        emit(ecs, ev.thishappened > 3 ? COOL_EVENT : UNCOOL_EVENT);
+        ecs.emit(ev.thishappened > 3 ? COOL_EVENT : UNCOOL_EVENT);
     }
 
     void callme(monkero::ecs& ecs)
@@ -104,7 +103,7 @@ public:
             if(d) d->value2 = 16;
 
             // You will commonly emit in loops like this.
-            emit(ecs, thirdevent{});
+            ecs.emit(thirdevent{});
         });
     }
 };

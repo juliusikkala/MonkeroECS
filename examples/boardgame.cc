@@ -81,9 +81,7 @@ public:
 
 // This system moves chess pieces randomly like a toddler, but stays within the
 // board.
-class players:
-    public monkero::system,
-    public monkero::emitter<move_event>
+class players: public monkero::system
 {
 public:
     void play_turn(monkero::ecs& ecs)
@@ -118,7 +116,7 @@ public:
             {
                 // Let's move the piece!
                 pos = to;
-                emit(ecs, move_event{id, pos});
+                ecs.emit(move_event{id, pos});
                 break;
             }
             dir = (dir + 1) % 8;

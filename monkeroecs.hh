@@ -55,6 +55,8 @@ SOFTWARE.
 #include <vector>
 #include <memory>
 #include <tuple>
+#include <limits>
+#include <any>
 
 /** This namespace contains all of MonkeroECS. */
 namespace monkero
@@ -107,20 +109,36 @@ struct remove_component
     Component* data; /**< A pointer to the component (it's not destroyed yet) */
 };
 
-template<typename EventType>
-class event_emitter;
+/** This class is used to receive events of the specified type(s).
+ * Once it is destructed, no events will be delivered to the associated
+ * callback function anymore.
+ * \note Due to the callback nature, event subscriptions are immovable.
+ * \see receiver
+ */
+class event_subscription
+{
+friend class ecs;
+public:
+    inline event_subscription(ecs* ctx = nullptr, size_t subscription_id = 0);
+    inline explicit event_subscription(event_subscription&& other);
+    event_subscription(const event_subscription& other) = delete;
+    inline ~event_subscription();
+
+    event_subscription& operator=(event_subscription&& other) = delete;
+    event_subscription& operator=(const event_subscription& other) = delete;
+
+private:
+    ecs* ctx;
+    size_t subscription_id;
+};
 
 // Provides event receiving facilities for one type alone. Derive
 // from class receiver instead in your own code.
 template<typename EventType>
 class event_receiver
 {
-friend class event_emitter<EventType>;
 public:
-    event_receiver();
-    event_receiver(const event_receiver& other) = delete;
-    event_receiver(event_receiver&& other) = delete;
-    virtual ~event_receiver();
+    virtual ~event_receiver() = default;
 
     /** Receivers must implement this for each received event type.
      * It's called by emitters when an event of EventType is emitted.
@@ -128,31 +146,6 @@ public:
      * \param event The event that occurred.
      */
     virtual void handle(ecs& ctx, const EventType& event) = 0;
-
-private:
-    // This could be a vector, but iteration isn't time-critical here so I went
-    // the easy way.
-    std::unordered_set<event_emitter<EventType>*> subscriptions;
-};
-
-// Same as event_receiver, don't derive from this directly. Derive from class
-// emitter instead.
-template<typename EventType>
-class event_emitter
-{
-friend class event_receiver<EventType>;
-public:
-    event_emitter();
-    event_emitter(const event_emitter& other) = delete;
-    event_emitter(event_emitter&& other) = delete;
-    virtual ~event_emitter();
-
-    void emit(ecs& ctx, const EventType& event);
-    size_t subscriber_count() const;
-    void subscribe(event_receiver<EventType>& s);
-
-private:
-    std::vector<event_receiver<EventType>*> subscribers;
 };
 
 /** Deriving from this class allows systems to receive events of the specified
@@ -164,32 +157,8 @@ template<typename... ReceiveEvents>
 class receiver: public event_receiver<ReceiveEvents>...
 {
 friend class ecs;
-public:
-    // Only for internal use, it's only public because of an implementation
-    // difficulty.
-    void connect_all_receivers(system& emitter);
 private:
-    template<typename Event>
-    void try_connect(system& emitter);
-};
-
-/** Deriving from this class allows systems to emit events of the specified
- * type(s).
- */
-template<typename... EmitEvents>
-class emitter: public event_emitter<EmitEvents>...
-{
-public:
-    // For whatever reason, C++ can't disambiguate between the different
-    // inherited emit() functions _despite_ the obvious argument type
-    // difference. This template fixes that behaviour.
-    /** Sends the given event to all receivers waiting for an event of this
-     * type.
-     * \param ctx The ECS of the system that is calling this function.
-     * \param event The event that you want to emit.
-     */
-    template<typename EventType>
-    void emit(ecs& ctx, const EventType& event);
+    event_subscription sub;
 };
 
 /** The primary class of the ECS.
@@ -198,6 +167,7 @@ public:
  */
 class ecs: public system
 {
+friend class event_subscription;
 public:
     /** The constructor. */
     inline ecs();
@@ -369,6 +339,65 @@ public:
     template<typename Component>
     entity get_entity(size_t index) const;
 
+    /** Calls all handlers of the given event type.
+     * \tparam EventType the type of the event to emit.
+     * \param event The event to emit.
+     */
+    template<typename EventType>
+    void emit(const EventType& event);
+
+    /** Returns how many handlers are present for the given event type.
+     * \tparam EventType the type of the event to check.
+     * \return the number of event handlers for this EventType.
+     */
+    template<typename EventType>
+    size_t get_handler_count() const;
+
+    /** Adds event handler(s) to the ECS.
+     * \tparam F Callable types, with signature void(ecs& ctx, const EventType& e).
+     * \param callbacks The event handler callbacks.
+     * \return ID of the "subscription"
+     * \see subscribe() for RAII handler lifetime.
+     * \see bind_event_handler() for binding to member functions.
+     */
+    template<typename... F>
+    size_t add_event_handler(F&&... callbacks);
+
+    /** Adds member functions of an object as event handler(s) to the ECS.
+     * \tparam T Type of the object whose members are being bound.
+     * \tparam F Member function types, with signature
+     * void(ecs& ctx, const EventType& e).
+     * \param userdata The class to bind to each callback.
+     * \param callbacks The event handler callbacks.
+     * \return ID of the "subscription"
+     * \see subscribe() for RAII handler lifetime.
+     * \see add_event_handler() for free-standing functions.
+     */
+    template<class T, typename... F>
+    size_t bind_event_handler(T* userdata, F&&... callbacks);
+
+    /** Removes event handler(s) from the ECS
+     * \param id ID of the "subscription"
+     * \see subscribe() for RAII handler lifetime.
+     */
+    inline void remove_event_handler(size_t id);
+
+    /** Adds event handlers for a receiver object.
+     * \tparam EventTypes Event types that are being received.
+     * \param r The receiver to add handlers for.
+     */
+    template<typename... EventTypes>
+    void add_receiver(receiver<EventTypes...>& r);
+
+    /** Adds event handlers with a subscription object that tracks lifetime.
+     * \tparam F Callable types, with signature void(ecs& ctx, const EventType& e).
+     * \param callbacks The event handler callbacks.
+     * \return The subscription object that removes the event handler on its
+     * destruction.
+     */
+    template<typename... F>
+    event_subscription subscribe(F&&... callbacks);
+
 private:
     class component_container_base: public system
     {
@@ -385,15 +414,10 @@ private:
     struct foreach_iterator_base;
 
     template<typename Component>
-    class component_container:
-        public component_container_base,
-        public emitter<remove_component<Component>, add_component<Component>>
+    class component_container: public component_container_base
     {
         template<typename> friend struct foreach_iterator_base;
     public:
-        using event_emitter<remove_component<Component>>::emit;
-        using event_emitter<add_component<Component>>::emit;
-
         struct component_tag
         {
             component_tag();
@@ -514,6 +538,12 @@ private:
     foreach_impl<false, Components...>
     foreach_redirector(const std::function<void(Components...)>&);
 
+    template<typename T>
+    T event_handler_type_detector(const std::function<void(ecs&, const T&)>&);
+
+    template<typename T, typename U>
+    U event_handler_type_detector(void (T::*)(ecs&, const U&));
+
     template<typename Component>
     void try_attach_dependencies(entity id);
 
@@ -523,18 +553,36 @@ private:
     inline void resolve_pending();
 
     template<typename Component>
-    static size_t get_type_key();
-    inline static size_t type_key_counter = 0;
+    static size_t get_component_type_key();
+    inline static size_t component_type_key_counter = 0;
+
+    template<typename Event>
+    static size_t get_event_type_key();
+    inline static size_t event_type_key_counter = 0;
+
+    template<typename F>
+    void internal_add_handler(size_t id, F&& f);
+
+    template<class C, typename F>
+    void internal_bind_handler(size_t id, C* c, F&& f);
 
     entity id_counter;
+    size_t subscriber_counter;
     int defer_batch;
     mutable std::vector<std::unique_ptr<component_container_base>> components;
-    struct system_data
+
+    struct event_handler
     {
-        std::unique_ptr<system> ptr;
-        std::function<void(system& emitter)> connect_all_receivers;
+        size_t subscription_id;
+
+        // TODO: Once we have std::function_ref, see if this can be optimized.
+        // The main difficulty we have to handle are pointers to member
+        // functions, which have been made unnecessarily unusable in C++.
+        std::function<void(ecs& ctx, const void* event)> callback;
     };
-    std::vector<system_data> systems;
+    std::vector<std::vector<event_handler>> event_handlers;
+
+    std::vector<std::unique_ptr<system>> systems;
 };
 
 /** Components may derive from this class to require other components.
@@ -680,7 +728,7 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
             bool all_required_equal = monkero_apply_tuple(
                 (it.required ?
                     (it.begin->id == cur_id ?
-                        true : (it.advance_up_to(cur_id), false)) : 
+                        true : (it.advance_up_to(cur_id), false)) :
                     (it.begin == it.end || it.begin->id >= cur_id ?
                         true : (it.advance_up_to(cur_id), true))) && ...
             );
@@ -815,13 +863,13 @@ entity ecs::get_entity(size_t index) const
 }
 
 template<typename T, typename=void>
-struct has_connect_all_receivers: std::false_type { };
+struct is_receiver: std::false_type { };
 
 template<typename T>
-struct has_connect_all_receivers<
+struct is_receiver<
     T,
     decltype((void)
-        std::declval<T>().connect_all_receivers(*(system*)nullptr), void()
+        std::declval<ecs>().add_receiver(*(T*)nullptr), void()
     )
 > : std::true_type { };
 
@@ -829,35 +877,11 @@ template<typename System, typename... Args>
 System& ecs::add_system(Args&&... args)
 {
     System* sys_ptr = new System(std::forward<Args>(args)...);
-    std::function<void(system& emitter)> sys_connect_all_receivers;
-    if constexpr(has_connect_all_receivers<System>::value)
-        sys_connect_all_receivers = std::bind(
-            &System::connect_all_receivers, sys_ptr, std::placeholders::_1
-        );
 
-    // Connect ECS-spawned emitters
-    if(sys_connect_all_receivers)
-        sys_connect_all_receivers(*this);
+    if constexpr(is_receiver<System>::value)
+        add_receiver(*sys_ptr);
 
-    // Connect component container emitters
-    for(auto& container: components)
-    {
-        if(sys_connect_all_receivers && container)
-            sys_connect_all_receivers(*container);
-    }
-
-    // Connect the new system to all other systems.
-    for(auto& sys: systems)
-    {
-        if(sys.connect_all_receivers)
-            sys.connect_all_receivers(*sys_ptr);
-        if(sys_connect_all_receivers)
-            sys_connect_all_receivers(*sys.ptr);
-    }
-
-    systems.push_back(
-        {std::unique_ptr<system>(sys_ptr), std::move(sys_connect_all_receivers)}
-    );
+    systems.emplace_back(sys_ptr);
 
     return *sys_ptr;
 }
@@ -866,7 +890,7 @@ template<typename System>
 System& ecs::ensure_system()
 {
     for(auto& sys: systems)
-        if(System* s = dynamic_cast<System*>(sys.ptr.get()))
+        if(System* s = dynamic_cast<System*>(sys.get()))
             return *s;
     return add_system<System>();
 }
@@ -1003,6 +1027,75 @@ entity ecs::component_container<Component>::get_entity(size_t index) const
     return components[index].id;
 }
 
+template<typename EventType>
+void ecs::emit(const EventType& event)
+{
+    size_t key = get_event_type_key<EventType>();
+    if(event_handlers.size() <= key) return;
+
+    for(event_handler& eh: event_handlers[key])
+        eh.callback(*this, &event);
+}
+
+template<typename EventType>
+size_t ecs::get_handler_count() const
+{
+    size_t key = get_event_type_key<EventType>();
+    if(event_handlers.size() <= key) return 0;
+    return event_handlers[key].size();
+}
+
+template<typename... F>
+size_t ecs::add_event_handler(F&&... callbacks)
+{
+    size_t id = subscriber_counter++;
+    (internal_add_handler(id, std::forward<F>(callbacks)), ...);
+    return id;
+}
+
+template<class T, typename... F>
+size_t ecs::bind_event_handler(T* userdata, F&&... callbacks)
+{
+    size_t id = subscriber_counter++;
+    (internal_bind_handler(id, userdata, std::forward<F>(callbacks)), ...);
+    return id;
+}
+
+void ecs::remove_event_handler(size_t id)
+{
+    for(std::vector<event_handler>& type_event_handlers: event_handlers)
+    {
+        for(
+            auto it = type_event_handlers.begin();
+            it != type_event_handlers.end();
+            ++it
+        ){
+            if(it->subscription_id == id)
+            {
+                type_event_handlers.erase(it);
+                break;
+            }
+        }
+    }
+}
+
+template<typename... F>
+event_subscription ecs::subscribe(F&&... callbacks)
+{
+    return event_subscription(
+        this, add_event_handler(std::forward<F>(callbacks)...)
+    );
+}
+
+template<typename... EventTypes>
+void ecs::add_receiver(receiver<EventTypes...>& r)
+{
+    r.sub.ctx = this;
+    r.sub.subscription_id = bind_event_handler(
+        &r, &event_receiver<EventTypes>::handle...
+    );
+}
+
 template<typename Component>
 void ecs::component_container<Component>::native_add(
     ecs& ctx,
@@ -1024,7 +1117,7 @@ void ecs::component_container<Component>::native_add(
         if(it == pending_addition.end() || it->id != id)
         {
             // Skip the search if nobody cares.
-            if(event_emitter<remove_component<Component>>::subscriber_count())
+            if(ctx.get_handler_count<remove_component<Component>>())
             {
                 // If this entity already exists in the components, signal the
                 // removal of the previous one.
@@ -1032,18 +1125,18 @@ void ecs::component_container<Component>::native_add(
                     components.begin(), components.end(), id
                 );
                 if(it != components.end() && it->id == id)
-                    emit(ctx, remove_component<Component>{id, it->get()});
+                    ctx.emit(remove_component<Component>{id, it->get()});
             }
 
-            emit(ctx, add_component<Component>{
+            ctx.emit(add_component<Component>{
                 id, pending_addition.emplace(it, id, std::move(c))->get()
             });
         }
         else
         {
-            emit(ctx, remove_component<Component>{id, it->get()});
+            ctx.emit(remove_component<Component>{id, it->get()});
             *it = component_data(id, std::move(c));
-            emit(ctx, add_component<Component>{id, it->get()});
+            ctx.emit(add_component<Component>{id, it->get()});
         }
     }
     else
@@ -1051,7 +1144,7 @@ void ecs::component_container<Component>::native_add(
         // If we can take the fast path of just dumping at the back, do it.
         if(components.size() == 0 || components.back().id < id)
         {
-            emit(ctx, add_component<Component>{
+            ctx.emit(add_component<Component>{
                 id, components.emplace_back(id, std::move(c)).get()
             });
         }
@@ -1060,14 +1153,14 @@ void ecs::component_container<Component>::native_add(
             auto it = std::lower_bound(
                 components.begin(), components.end(), id);
             if(it->id != id)
-                emit(ctx, add_component<Component>{
+                ctx.emit(add_component<Component>{
                     id, components.emplace(it, id, std::move(c))->get()
                 });
             else
             {
-                emit(ctx, remove_component<Component>{id, it->get()});
+                ctx.emit(remove_component<Component>{id, it->get()});
                 *it = component_data(id, std::move(c));
-                emit(ctx, add_component<Component>{id, it->get()});
+                ctx.emit(add_component<Component>{id, it->get()});
             }
         }
     }
@@ -1117,8 +1210,7 @@ void ecs::component_container<Component>::reserve(size_t count)
 template<typename Component>
 void ecs::component_container<Component>::remove(ecs& ctx, entity id)
 {
-    bool do_emit = 
-        event_emitter<remove_component<Component>>::subscriber_count();
+    bool do_emit = ctx.get_handler_count<remove_component<Component>>();
 
     if(ctx.defer_batch)
     {
@@ -1132,7 +1224,7 @@ void ecs::component_container<Component>::remove(ecs& ctx, entity id)
             {
                 component_data tmp = std::move(*ait);
                 pending_addition.erase(ait);
-                emit(ctx, remove_component<Component>{id, tmp.get()});
+                ctx.emit(remove_component<Component>{id, tmp.get()});
             }
             else pending_addition.erase(ait);
         }
@@ -1148,7 +1240,7 @@ void ecs::component_container<Component>::remove(ecs& ctx, entity id)
                 auto cit = std::lower_bound(
                     components.begin(), components.end(), id);
                 if(cit != components.end() && cit->id == id)
-                    emit(ctx, remove_component<Component>{id, cit->get()});
+                    ctx.emit(remove_component<Component>{id, cit->get()});
             }
         }
     }
@@ -1162,7 +1254,7 @@ void ecs::component_container<Component>::remove(ecs& ctx, entity id)
             {
                 component_data tmp = std::move(*it);
                 components.erase(it);
-                emit(ctx, remove_component<Component>{id, tmp.get()});
+                ctx.emit(remove_component<Component>{id, tmp.get()});
             }
             else components.erase(it);
         }
@@ -1295,8 +1387,7 @@ void ecs::component_container<Component>::resolve_pending()
 template<typename Component>
 void ecs::component_container<Component>::clear(ecs& ctx)
 {
-    bool do_emit =
-        event_emitter<remove_component<Component>>::subscriber_count();
+    bool do_emit = ctx.get_handler_count<remove_component<Component>>();
 
     if(ctx.defer_batch)
     {
@@ -1319,7 +1410,7 @@ void ecs::component_container<Component>::clear(ecs& ctx)
         components.clear();
 
         for(component_data& d: tmp)
-            emit(ctx, remove_component<Component>{d.id, d.get()});
+            ctx.emit(remove_component<Component>{d.id, d.get()});
     }
 }
 
@@ -1332,19 +1423,12 @@ size_t ecs::component_container<Component>::count() const
 template<typename Component>
 ecs::component_container<Component>& ecs::get_container() const
 {
-    size_t key = get_type_key<Component>();
+    size_t key = get_component_type_key<Component>();
     if(components.size() <= key) components.resize(key+1);
     auto& base_ptr = components[key];
-    if(!base_ptr) 
+    if(!base_ptr)
     {
         base_ptr.reset(new component_container<Component>());
-
-        // Connect all systems to the new component container.
-        for(auto& sys: systems)
-        {
-            if(sys.connect_all_receivers)
-                sys.connect_all_receivers(*base_ptr);
-        }
 
         if constexpr(has_ensure_dependency_systems_exist<Component>::value)
             Component::ensure_dependency_systems_exist(*const_cast<ecs*>(this));
@@ -1359,10 +1443,48 @@ void ecs::resolve_pending()
 }
 
 template<typename Component>
-size_t ecs::get_type_key()
+size_t ecs::get_component_type_key()
 {
-    static size_t key = type_key_counter++;
+    static size_t key = component_type_key_counter++;
     return key;
+}
+
+template<typename Event>
+size_t ecs::get_event_type_key()
+{
+    static size_t key = event_type_key_counter++;
+    return key;
+}
+
+template<typename F>
+void ecs::internal_add_handler(size_t id, F&& f)
+{
+    using T = decltype(event_handler_type_detector(f));
+    size_t key = get_event_type_key<T>();
+    if(event_handlers.size() <= key) event_handlers.resize(key+1);
+
+    event_handler h;
+    h.subscription_id = id;
+    h.callback = [f = std::forward<F>(f)](ecs& ctx, const void* ptr){
+        f(ctx, *(const T*)ptr);
+    };
+    event_handlers[key].push_back(std::move(h));
+}
+
+template<class C, typename F>
+void ecs::internal_bind_handler(size_t id, C* c, F&& f)
+{
+    using T = decltype(event_handler_type_detector(f));
+
+    size_t key = get_event_type_key<T>();
+    if(event_handlers.size() <= key) event_handlers.resize(key+1);
+
+    event_handler h;
+    h.subscription_id = id;
+    h.callback = [c = c, f = std::forward<F>(f)](ecs& ctx, const void* ptr){
+        ((*c).*f)(ctx, *(const T*)ptr);
+    };
+    event_handlers[key].push_back(std::move(h));
 }
 
 template<typename... DependencyComponents>
@@ -1379,77 +1501,21 @@ ensure_dependency_systems_exist(ecs& ctx)
     (ctx.ensure_system<DependencySystems>(), ...);
 }
 
-template<typename EventType>
-event_receiver<EventType>::event_receiver()
+event_subscription::event_subscription(ecs* ctx, size_t subscription_id)
+: ctx(ctx), subscription_id(subscription_id)
 {
 }
 
-template<typename EventType>
-event_receiver<EventType>::~event_receiver()
+event_subscription::event_subscription(event_subscription&& other)
+: ctx(other.ctx), subscription_id(other.subscription_id)
 {
-    for(auto* emitter: subscriptions)
-    {
-        auto it = std::find(
-            emitter->subscribers.begin(), emitter->subscribers.end(), this
-        );
-        if(it != emitter->subscribers.end())
-            emitter->subscribers.erase(it);
-    }
+    other.ctx = nullptr;
 }
 
-template<typename... ReceiveEvents>
-void receiver<ReceiveEvents...>::connect_all_receivers(
-    system& emitter
-){
-    (try_connect<ReceiveEvents>(emitter), ...);
-}
-
-template<typename... ReceiveEvents>
-template<typename Event>
-void receiver<ReceiveEvents...>::try_connect(system& emitter)
+event_subscription::~event_subscription()
 {
-    auto* ptr = dynamic_cast<event_emitter<Event>*>(&emitter);
-    if(ptr) ptr->subscribe(*static_cast<event_receiver<Event>*>(this));
-}
-
-template<typename... EmitEvents>
-template<typename EventType>
-void emitter<EmitEvents...>::emit(ecs& ctx, const EventType& event)
-{
-    // See the header for this, I know this looks dumb.
-    event_emitter<EventType>::emit(ctx, event);
-}
-
-template<typename EventType>
-event_emitter<EventType>::event_emitter()
-{
-}
-
-template<typename EventType>
-event_emitter<EventType>::~event_emitter()
-{
-    for(auto* receiver: subscribers)
-        receiver->subscriptions.erase(this);
-}
-
-template<typename EventType>
-void event_emitter<EventType>::emit(ecs& ctx, const EventType& event)
-{
-    for(auto* receiver: subscribers)
-        receiver->handle(ctx, event);
-}
-template<typename EventType>
-size_t event_emitter<EventType>::subscriber_count() const
-{
-    return subscribers.size();
-}
-
-template<typename EventType>
-void event_emitter<EventType>::subscribe(event_receiver<EventType>& s)
-{
-    auto it = std::find(subscribers.begin(), subscribers.end(), &s);
-    if(it == subscribers.end()) subscribers.push_back(&s);
-    s.subscriptions.insert(this);
+    if(ctx)
+        ctx->remove_event_handler(subscription_id);
 }
 
 }
