@@ -46,19 +46,18 @@ enum yourevent
 
 struct thirdevent {};
 
-// All systems must derive from monkero::system. That is the only mandatory
-// part.
-class minimalsystem: public monkero::system
+// Systems actually exits a bit separate from the ECS object. Like components,
+// there are exactly zero requirements for them, but optional base classes
+// are available.
+class minimalsystem
 {
 public:
 };
 
-// Additionally, systems usually want to communicate with other systems.
-// This is done through events. You need to derive from emitter and receiver to
-// mark which event types your class deals with.
-class mysystem:
-    public monkero::system,
-    public monkero::receiver<myevent>
+// Systems usually want to communicate with other systems. This is done through
+// events. You can to derive from receiver to mark which event types your class
+// deals with. You'll have to connect it to an ECS with ecs::add_receiver().
+class mysystem: public monkero::receiver<myevent>
 {
 public:
     // Each event type listed in receiver must have a corresponding handler.
@@ -110,7 +109,6 @@ public:
 
 // This system track the count of tagcomponents available.
 class tagtracker:
-    public monkero::system,
     public monkero::receiver<
         monkero::add_component<tagcomponent>,
         monkero::remove_component<tagcomponent>
@@ -134,12 +132,6 @@ private:
     int tags = 0;
 };
 
-// Components can also depend on systems. If the needed system doesn't exist
-// yet, it will be added when the first component of this type is added to the
-// ECS.
-struct dependent2: public monkero::dependency_systems<mysystem>
-{
-};
 
 int main()
 {
@@ -148,10 +140,12 @@ int main()
     // Let's add a system. This one tracks a specific component type as
     // explained above. It must therefore exist before the entities so that it
     // gets all those add_component events.
-    ecs.add_system<tagtracker>();
+    tagtracker tt;
+    // To make this system receive events from our ECS, we use add_receiver().
+    ecs.add_receiver(tt);
 
-    // If you need to call the system manually, save the returned reference.
-    mysystem& sys = ecs.add_system<mysystem>(); 
+    mysystem sys;
+    ecs.add_receiver(sys);
 
     // ecs::add() creates an entity. This operation does not reserve any memory.
     monkero::entity first = ecs.add();
@@ -215,9 +209,6 @@ int main()
 
     // Let's call our own system now.
     sys.callme(ecs);
-
-    // You can remove all systems like this.
-    ecs.clear_systems();
 
     // You can remove all entities like this.
     ecs.clear_entities();

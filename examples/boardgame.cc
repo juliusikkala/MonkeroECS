@@ -36,8 +36,6 @@ struct move_event
 
 // This system removes the opponent's pieces when a move captures one.
 class piece_remover:
-    // All systems have to derive from monkero::system.
-    public monkero::system,
     // The receiver template takes a list of event types this system is
     // interested in. They will be automatically fed to the system when they
     // are emitted.
@@ -81,7 +79,7 @@ public:
 
 // This system moves chess pieces randomly like a toddler, but stays within the
 // board.
-class players: public monkero::system
+class players
 {
 public:
     void play_turn(monkero::ecs& ecs)
@@ -133,7 +131,6 @@ private:
 // This system is responsible for checking the win condition. In our game, the
 // winner is the side that has pieces left at the end.
 class win_condition_checker:
-    public monkero::system,
     // add_component and remove_component are built-in events. They're sent
     // whenever a component of the specified type is added (or removed).
     public monkero::receiver<
@@ -176,9 +173,11 @@ int main()
     srand(time(NULL));
 
     // Let's add the systems first.
-    ecs.add_system<piece_remover>();
-    players& p = ecs.add_system<players>();
-    win_condition_checker& w = ecs.add_system<win_condition_checker>();
+    piece_remover remover;
+    ecs.add_receiver(remover);
+    players p;
+    win_condition_checker w;
+    ecs.add_receiver(w);
 
     // Then, let's populate the chess board with entities.
     const piece pieces[8] = {

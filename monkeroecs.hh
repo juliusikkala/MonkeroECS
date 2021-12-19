@@ -79,17 +79,6 @@ using entity = uint32_t;
 struct ptr_component {};
 class ecs;
 
-/** All systems must derive from this class.
- * This pretty much solely exists to force a common vtable basis which is needed
- * due to some dynamic_cast trickery.
- */
-class system
-{
-public:
-    /** An empty destructor that creates the vtable. */
-    virtual ~system() = default;
-};
-
 /** A built-in event emitted when a component is added to the ECS. */
 template<typename Component>
 struct add_component
@@ -162,10 +151,10 @@ private:
 };
 
 /** The primary class of the ECS.
- * Entities are created by it, components are attached throught it and
- * systems are created in it.
+ * Entities are created by it, components are attached throught it and events
+ * are routed through it.
  */
-class ecs: public system
+class ecs
 {
 friend class event_subscription;
 public:
@@ -173,7 +162,7 @@ public:
     inline ecs();
     /** The destructor.
      * It ensures that all remove_component events are sent for the remainder
-     * of the components before systems are cleared.
+     * of the components before event handlers are cleared.
      */
     inline ~ecs();
 
@@ -252,27 +241,6 @@ public:
      * previous entities!
      */
     inline void clear_entities();
-
-    /** Creates a system in the ECS.
-     * The system is created in-place. Event receivers and emitters are
-     * connected automatically here.
-     * \tparam System The type of the system to create.
-     * \param args Arguments for the constructor of System.
-     * \return A reference to the created system.
-     */
-    template<typename System, typename... Args>
-    System& add_system(Args&&... args);
-
-    /** Adds a system to the ECS if it isn't present already.
-     * Just calls the default constructor if needed.
-     * \tparam System The type of the system to create or find.
-     * \return Returns a reference to the found or created system.
-     */
-    template<typename System>
-    System& ensure_system();
-
-    /** Removes all systems.  */
-    inline void clear_systems();
 
     /** Starts batching behaviour for add/remove.
      * If you know you are going to do a lot of modifications to existing
@@ -399,7 +367,7 @@ public:
     event_subscription subscribe(F&&... callbacks);
 
 private:
-    class component_container_base: public system
+    class component_container_base
     {
     public:
         virtual ~component_container_base() = default;
@@ -581,8 +549,6 @@ private:
         std::function<void(ecs& ctx, const void* event)> callback;
     };
     std::vector<std::vector<event_handler>> event_handlers;
-
-    std::vector<std::unique_ptr<system>> systems;
 };
 
 /** Components may derive from this class to require other components.
@@ -595,21 +561,6 @@ class dependency_components
 friend class ecs;
 public:
     static void ensure_dependency_components_exist(entity id, ecs& ctx);
-};
-
-/** Components may derive from this class to require specific systems.
- * If the system does not yet exist in the ECS, it is created.
- * Typically, dependency systems should just ensure validity of data. For
- * example, if components hold pointers to each other, they should have a
- * dependency to a system that updates those pointers when a component is
- * removed so that no dangling pointers are left.
- */
-template<typename... DependencySystems>
-class dependency_systems
-{
-friend class ecs;
-public:
-    static void ensure_dependency_systems_exist(ecs& ctx);
 };
 
 //==============================================================================
@@ -757,17 +708,6 @@ struct has_ensure_dependency_components_exist<
     )
 > : std::true_type { };
 
-template<typename T, typename=void>
-struct has_ensure_dependency_systems_exist: std::false_type { };
-
-template<typename T>
-struct has_ensure_dependency_systems_exist<
-    T,
-    decltype((void)
-        T::ensure_dependency_systems_exist(*(ecs*)nullptr), void()
-    )
-> : std::true_type { };
-
 template<typename Component>
 void ecs::try_attach_dependencies(entity id)
 {
@@ -873,28 +813,6 @@ struct is_receiver<
     )
 > : std::true_type { };
 
-template<typename System, typename... Args>
-System& ecs::add_system(Args&&... args)
-{
-    System* sys_ptr = new System(std::forward<Args>(args)...);
-
-    if constexpr(is_receiver<System>::value)
-        add_receiver(*sys_ptr);
-
-    systems.emplace_back(sys_ptr);
-
-    return *sys_ptr;
-}
-
-template<typename System>
-System& ecs::ensure_system()
-{
-    for(auto& sys: systems)
-        if(System* s = dynamic_cast<System*>(sys.get()))
-            return *s;
-    return add_system<System>();
-}
-
 void ecs::remove(entity id)
 {
     for(auto& c: components)
@@ -912,11 +830,6 @@ void ecs::clear_entities()
     for(auto& c: components)
         if(c) c->clear(*this);
     id_counter = 0;
-}
-
-void ecs::clear_systems()
-{
-    systems.clear();
 }
 
 template<typename Component>
@@ -1429,9 +1342,6 @@ ecs::component_container<Component>& ecs::get_container() const
     if(!base_ptr)
     {
         base_ptr.reset(new component_container<Component>());
-
-        if constexpr(has_ensure_dependency_systems_exist<Component>::value)
-            Component::ensure_dependency_systems_exist(*const_cast<ecs*>(this));
     }
     return *static_cast<component_container<Component>*>(base_ptr.get());
 }
@@ -1492,13 +1402,6 @@ void dependency_components<DependencyComponents...>::
 ensure_dependency_components_exist(entity id, ecs& ctx)
 {
     ((ctx.has<DependencyComponents>(id) ? void() : ctx.attach(id, DependencyComponents())), ...);
-}
-
-template<typename... DependencySystems>
-void dependency_systems<DependencySystems...>::
-ensure_dependency_systems_exist(ecs& ctx)
-{
-    (ctx.ensure_system<DependencySystems>(), ...);
 }
 
 event_subscription::event_subscription(ecs* ctx, size_t subscription_id)
