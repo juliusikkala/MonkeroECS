@@ -43,3 +43,8 @@ executable(
   include_directories: [incdir],
   install: true,
 )
+
+test('events', executable('events', 'tests/events.cc', include_directories: [incdir]))
+test('entities', executable('entities', 'tests/entities.cc', include_directories: [incdir]))
+test('components', executable('components', 'tests/components.cc', include_directories: [incdir]))
+test('foreach', executable('foreach', 'tests/foreach.cc', include_directories: [incdir]))

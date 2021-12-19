@@ -9,16 +9,16 @@ Features:
 - Only depends on standard library 
 - Events
 - Dependencies
-  - Components can depend on systems and other components which will be added
-    automatically if not present already
+  - Components can depend on other components which will be added automatically
+    if not present already
 - Flexible but simple-to-use foreach
 - Efficient multi-component iteration
 - Memory-efficient handling of tag components
 - Batched modification
+- Unit tests included
 
 In the interest of saving your time, here's a list of common game dev deal-breakers:
-- No tests included (for now)
-- Uses RTTI (not in components though) & STL & lots of templates
+- Uses RTTI (not in components though) & STL (std::vector only) & lots of templates
 - Some potentially slow-to-include standard library headers
 - Looking up individual components by entity id is logarithmic
 - Thread-oblivious
@@ -61,9 +61,7 @@ struct hit_event
 
 3. Create a system & list emitted and received events!
 ```cpp
-class health_system:
-    public monkero::system,
-    public monkero::receiver<hit_event>
+class health_system: public monkero::receiver<hit_event>
 {
 public:
     void handle(monkero::ecs& ecs, const hit_event& e)
@@ -72,27 +70,26 @@ public:
     }
 };
 
-class poison_gas_system:
-    public monkero::system,
-    public monkero::emitter<hit_event>
+class poison_gas_system
 {
 public:
     void tick(monkero::ecs& ecs)
     {
         // Iterate all entities with health component
         ecs([&](monkero::entity id, health&){
-            emit(ecs, hit_event{id, 10});
+            ecs.emit(hit_event{id, 10});
         });
     }
 };
 ```
 
-4. Add entities, components and systems to the ECS instance!
+4. Add entities, components and systems to the ECS!
 ```cpp
 monkero::ecs ecs;
 
-ecs.add_system<health_system>();
-poison_gas_system& gas = ecs.add_system<poison_gas_system>();
+health_system hs;
+ecs.add_receiver(hs);
+poison_gas_system gas;
 
 // Adds entity with component health
 ecs.add(health{30});

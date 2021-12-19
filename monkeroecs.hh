@@ -509,6 +509,9 @@ private:
     template<typename T>
     T event_handler_type_detector(const std::function<void(ecs&, const T&)>&);
 
+    template<typename T>
+    T event_handler_type_detector(void (*)(ecs&, const T&));
+
     template<typename T, typename U>
     U event_handler_type_detector(void (T::*)(ecs&, const U&));
 
