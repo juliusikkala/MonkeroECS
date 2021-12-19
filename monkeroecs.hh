@@ -68,6 +68,7 @@ namespace monkero
  * you truly need over 4 billion entities and have tons of memory.
  */
 using entity = uint32_t;
+inline constexpr entity INVALID_ENTITY = std::numeric_limits<entity>::max();
 
 /** A base class for components which need to have unchanging memory addresses.
  * Derive from this if you want to have an extra layer of indirection in the
@@ -222,9 +223,8 @@ public:
     void attach(entity id, Components&&... components);
 
     /** Removes all components related to the entity.
-     * Because the entity is just a numeric identifier, this doesn't actually
-     * remove the entity; only all components. You can technically use the same
-     * entity again by calling attach() for it.
+     * Unlike the component-specific remove() call, this also releases the ID to
+     * be reused by another entity.
      * \param id The entity whose components to remove.
      */
     inline void remove(entity id);
@@ -535,6 +535,7 @@ private:
     void internal_bind_handler(size_t id, C* c, F&& f);
 
     entity id_counter;
+    std::vector<entity> reusable_ids;
     size_t subscriber_counter;
     int defer_batch;
     mutable std::vector<std::unique_ptr<component_container_base>> components;
@@ -734,7 +735,18 @@ void ecs::operator()(F&& f)
 
 entity ecs::add()
 {
-    return id_counter++;
+    if(reusable_ids.size() > 0)
+    {
+        entity id = reusable_ids.back();
+        reusable_ids.pop_back();
+        return id;
+    }
+    else
+    {
+        if(id_counter == INVALID_ENTITY)
+            return INVALID_ENTITY;
+        return id_counter++;
+    }
 }
 
 template<typename... Components>
@@ -817,6 +829,7 @@ void ecs::remove(entity id)
 {
     for(auto& c: components)
         if(c) c->remove(*this, id);
+    reusable_ids.push_back(id);
 }
 
 template<typename Component>
@@ -830,6 +843,7 @@ void ecs::clear_entities()
     for(auto& c: components)
         if(c) c->clear(*this);
     id_counter = 0;
+    reusable_ids.clear();
 }
 
 template<typename Component>
