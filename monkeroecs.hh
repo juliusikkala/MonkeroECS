@@ -151,6 +151,47 @@ private:
     event_subscription sub;
 };
 
+/** Specializing this class for your component type and implementing the given
+ * functions allows for accelerated entity searching based on any parameter you
+ * want to define. The default does not define any searching operations.
+ */
+template<typename Component>
+class search_index
+{
+public:
+    // It's up to you how you want to do this searching. You should return
+    // INVALID_ENTITY if there was no entity matching the search parameters.
+    // You can also have multiple find() overloads for the same component type.
+
+    // entity find(some parameters here) const;
+
+    /** Called automatically when an entity of this component type is added.
+     * \param id ID of the entity whose component is being added.
+     * \param data the component data itself.
+     * \warn Don't save a pointer to the data unless the component derives from
+     *  ptr_component, otherwise the address can change without notification to
+     *  you.
+     */
+    void add_entity(entity id, const Component& data);
+
+    /** Called automatically when an entity of this component type is removed.
+     * \param id ID of the entity whose component is being removed.
+     * \param data the component data itself.
+     */
+    void remove_entity(entity id, const Component& data);
+
+    /** Manual full search index refresh.
+     * Never called automatically, the ECS has a refresh_search_index() function
+     * that the user must call that then calls this.
+     * \param e the ECS context.
+     */
+    void update(ecs& e);
+
+    // Don't copy this one though, or else you won't get some add_entity or
+    // remove_entity calls.
+    using empty_default_impl = void;
+};
+
 /** The primary class of the ECS.
  * Entities are created by it, components are attached throught it and events
  * are routed through it.
@@ -307,6 +348,47 @@ public:
     template<typename Component>
     entity get_entity(size_t index) const;
 
+    /** Uses search_index<Component> to find the desired component.
+     * \tparam Component the component type to search for.
+     * \tparam Args search argument types.
+     * \param args arguments for search_index<Component>::find().
+     * \return A pointer to the component if present, null otherwise.
+     * \see update_search_index()
+     */
+    template<typename Component, typename... Args>
+    Component* find_component(Args&&... args);
+
+    /** Uses search_index<Component> to find the desired component.
+     * Const version.
+     * \tparam Component the component type to search for.
+     * \tparam Args search argument types.
+     * \param args arguments for search_index<Component>::find().
+     * \return A pointer to the component if present, null otherwise.
+     * \see update_search_index()
+     */
+    template<typename Component, typename... Args>
+    const Component* find_component(Args&&... args) const;
+
+    /** Uses search_index<Component> to find the desired entity.
+     * \tparam Component the component type to search for.
+     * \tparam Args search argument types.
+     * \param args arguments for search_index<Component>::find().
+     * \return An entity id if found, INVALID_ENTITY otherwise.
+     * \see update_search_index()
+     */
+    template<typename Component, typename... Args>
+    entity find(Args&&... args) const;
+
+    /** Calls search_index<Component>::update() for the component type.
+     * \tparam Component the component type whose search index to update.
+     */
+    template<typename Component>
+    void update_search_index();
+
+    /** Updates search indices of all component types.
+     */
+    inline void update_search_indices();
+
     /** Calls all handlers of the given event type.
      * \tparam EventType the type of the event to emit.
      * \param event The event to emit.
@@ -376,6 +458,7 @@ private:
         inline virtual void remove(ecs& ctx, entity id) = 0;
         inline virtual void clear(ecs& ctx) = 0;
         inline virtual size_t count() const = 0;
+        inline virtual void update_search_index(ecs& ctx) = 0;
     };
 
     template<typename Component>
@@ -428,6 +511,8 @@ private:
 
         Component* get(entity id);
         entity get_entity(size_t index) const;
+        template<typename... Args>
+        entity find_entity(Args&&... args) const;
 
         void native_add(
             ecs& ctx,
@@ -442,8 +527,13 @@ private:
         void resolve_pending() override;
         void clear(ecs& ctx) override;
         size_t count() const override;
+        void update_search_index(ecs& ctx) override;
 
     private:
+        void signal_add(ecs& ctx, entity id, Component* data);
+        void signal_remove(ecs& ctx, entity id, Component* data);
+
+        search_index<Component> search;
         std::vector<component_data> components;
         std::vector<entity> pending_removal;
         std::vector<component_data> pending_addition;
@@ -817,6 +907,40 @@ entity ecs::get_entity(size_t index) const
     return get_container<Component>().get_entity(index);
 }
 
+template<typename Component, typename... Args>
+Component* ecs::find_component(Args&&... args)
+{
+    return get<Component>(
+        find<Component>(std::forward<Args>(args)...)
+    );
+}
+
+template<typename Component, typename... Args>
+const Component* ecs::find_component(Args&&... args) const
+{
+    return get<Component>(
+        find<Component>(std::forward<Args>(args)...)
+    );
+}
+
+template<typename Component, typename... Args>
+entity ecs::find(Args&&... args) const
+{
+    return get_container<Component>().find_entity(std::forward<Args>(args)...);
+}
+
+template<typename Component>
+void ecs::update_search_index()
+{
+    return get_container<Component>().update_search_index(*this);
+}
+
+void ecs::update_search_indices()
+{
+    for(auto& c: components)
+        if(c) c->update_search_index(*this);
+}
+
 template<typename T, typename=void>
 struct is_receiver: std::false_type { };
 
@@ -957,6 +1081,13 @@ entity ecs::component_container<Component>::get_entity(size_t index) const
     return components[index].id;
 }
 
+template<typename Component>
+template<typename... Args>
+entity ecs::component_container<Component>::find_entity(Args&&... args) const
+{
+    return search.find(std::forward<Args>(args)...);
+}
+
 template<typename EventType>
 void ecs::emit(const EventType& event)
 {
@@ -1026,6 +1157,20 @@ void ecs::add_receiver(receiver<EventTypes...>& r)
     );
 }
 
+template<typename T>
+constexpr bool search_index_is_empty_default(
+    int,
+    typename T::empty_default_impl const * = nullptr
+){ return true; }
+
+template<typename T>
+constexpr bool search_index_is_empty_default(long)
+{ return false; }
+
+template<typename T>
+constexpr bool search_index_is_empty_default()
+ { return search_index_is_empty_default<T>(0); }
+
 template<typename Component>
 void ecs::component_container<Component>::native_add(
     ecs& ctx,
@@ -1047,26 +1192,28 @@ void ecs::component_container<Component>::native_add(
         if(it == pending_addition.end() || it->id != id)
         {
             // Skip the search if nobody cares.
-            if(ctx.get_handler_count<remove_component<Component>>())
-            {
+            if(
+                ctx.get_handler_count<remove_component<Component>>() ||
+                !search_index_is_empty_default<decltype(search)>()
+            ){
                 // If this entity already exists in the components, signal the
                 // removal of the previous one.
                 auto it = std::lower_bound(
                     components.begin(), components.end(), id
                 );
                 if(it != components.end() && it->id == id)
-                    ctx.emit(remove_component<Component>{id, it->get()});
+                    signal_remove(ctx, id, it->get());
             }
 
-            ctx.emit(add_component<Component>{
-                id, pending_addition.emplace(it, id, std::move(c))->get()
-            });
+            signal_add(
+                ctx, id, pending_addition.emplace(it, id, std::move(c))->get()
+            );
         }
         else
         {
-            ctx.emit(remove_component<Component>{id, it->get()});
+            signal_remove(ctx, id, it->get());
             *it = component_data(id, std::move(c));
-            ctx.emit(add_component<Component>{id, it->get()});
+            signal_add(ctx, id, it->get());
         }
     }
     else
@@ -1074,23 +1221,23 @@ void ecs::component_container<Component>::native_add(
         // If we can take the fast path of just dumping at the back, do it.
         if(components.size() == 0 || components.back().id < id)
         {
-            ctx.emit(add_component<Component>{
-                id, components.emplace_back(id, std::move(c)).get()
-            });
+            signal_add(
+                ctx, id, components.emplace_back(id, std::move(c)).get()
+            );
         }
         else
         {
             auto it = std::lower_bound(
                 components.begin(), components.end(), id);
             if(it->id != id)
-                ctx.emit(add_component<Component>{
-                    id, components.emplace(it, id, std::move(c))->get()
-                });
+                signal_add(
+                    ctx, id, components.emplace(it, id, std::move(c))->get()
+                );
             else
             {
-                ctx.emit(remove_component<Component>{id, it->get()});
+                signal_remove(ctx, id, it->get());
                 *it = component_data(id, std::move(c));
-                ctx.emit(add_component<Component>{id, it->get()});
+                signal_add(ctx, id, it->get());
             }
         }
     }
@@ -1140,7 +1287,8 @@ void ecs::component_container<Component>::reserve(size_t count)
 template<typename Component>
 void ecs::component_container<Component>::remove(ecs& ctx, entity id)
 {
-    bool do_emit = ctx.get_handler_count<remove_component<Component>>();
+    bool do_emit = ctx.get_handler_count<remove_component<Component>>() ||
+        !search_index_is_empty_default<decltype(search)>();
 
     if(ctx.defer_batch)
     {
@@ -1154,7 +1302,7 @@ void ecs::component_container<Component>::remove(ecs& ctx, entity id)
             {
                 component_data tmp = std::move(*ait);
                 pending_addition.erase(ait);
-                ctx.emit(remove_component<Component>{id, tmp.get()});
+                signal_remove(ctx, id, tmp.get());
             }
             else pending_addition.erase(ait);
         }
@@ -1170,7 +1318,7 @@ void ecs::component_container<Component>::remove(ecs& ctx, entity id)
                 auto cit = std::lower_bound(
                     components.begin(), components.end(), id);
                 if(cit != components.end() && cit->id == id)
-                    ctx.emit(remove_component<Component>{id, cit->get()});
+                    signal_remove(ctx, id, cit->get());
             }
         }
     }
@@ -1184,7 +1332,7 @@ void ecs::component_container<Component>::remove(ecs& ctx, entity id)
             {
                 component_data tmp = std::move(*it);
                 components.erase(it);
-                ctx.emit(remove_component<Component>{id, tmp.get()});
+                signal_remove(ctx, id, tmp.get());
             }
             else components.erase(it);
         }
@@ -1317,7 +1465,8 @@ void ecs::component_container<Component>::resolve_pending()
 template<typename Component>
 void ecs::component_container<Component>::clear(ecs& ctx)
 {
-    bool do_emit = ctx.get_handler_count<remove_component<Component>>();
+    bool do_emit = ctx.get_handler_count<remove_component<Component>>() ||
+        !search_index_is_empty_default<decltype(search)>();
 
     if(ctx.defer_batch)
     {
@@ -1340,7 +1489,7 @@ void ecs::component_container<Component>::clear(ecs& ctx)
         components.clear();
 
         for(component_data& d: tmp)
-            ctx.emit(remove_component<Component>{d.id, d.get()});
+            signal_remove(ctx, d.id, d.get());
     }
 }
 
@@ -1348,6 +1497,26 @@ template<typename Component>
 size_t ecs::component_container<Component>::count() const
 {
     return components.size();
+}
+
+template<typename Component>
+void ecs::component_container<Component>::update_search_index(ecs& ctx)
+{
+    search.update(ctx);
+}
+
+template<typename Component>
+void ecs::component_container<Component>::signal_add(ecs& ctx, entity id, Component* data)
+{
+    search.add_entity(id, *data);
+    ctx.emit(add_component<Component>{id, data});
+}
+
+template<typename Component>
+void ecs::component_container<Component>::signal_remove(ecs& ctx, entity id, Component* data)
+{
+    search.remove_entity(id, *data);
+    ctx.emit(remove_component<Component>{id, data});
 }
 
 template<typename Component>
@@ -1437,6 +1606,15 @@ event_subscription::~event_subscription()
     if(ctx)
         ctx->remove_event_handler(subscription_id);
 }
+
+template<typename Component>
+void search_index<Component>::add_entity(entity, const Component&) {}
+
+template<typename Component>
+void search_index<Component>::update(ecs&) {}
+
+template<typename Component>
+void search_index<Component>::remove_entity(entity, const Component&) {}
 
 }
 
