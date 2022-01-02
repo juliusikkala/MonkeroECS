@@ -50,7 +50,8 @@ SOFTWARE.
 #ifndef MONKERO_ECS_HH
 #define MONKERO_ECS_HH
 #include <functional>
-#include <unordered_set>
+#include <unordered_map>
+#include <map>
 #include <algorithm>
 #include <vector>
 #include <memory>
@@ -283,6 +284,19 @@ public:
      */
     inline void clear_entities();
 
+    /** Copies entities from another ECS to this one.
+     * \param other the other ECS whose entities and components to copy to this.
+     * \param translation_table if not nullptr, will be filled in with the
+     * entity ID correspondence from the old ECS to the new.
+     * \warn event handlers are not copied, only entities and components. Entity
+     * IDs will also change.
+     * \warn You should finish batching on the other ECS before calling this.
+     */
+    inline void concat(
+        ecs& other,
+        std::map<entity, entity>* translation_table = nullptr
+    );
+
     /** Starts batching behaviour for add/remove.
      * If you know you are going to do a lot of modifications to existing
      * entities (i.e. attaching new components to old entities or removing
@@ -459,6 +473,13 @@ private:
         inline virtual void clear(ecs& ctx) = 0;
         inline virtual size_t count() const = 0;
         inline virtual void update_search_index(ecs& ctx) = 0;
+        inline virtual void list_entities(
+            std::map<entity, entity>& translation_table
+        ) = 0;
+        inline virtual void concat(
+            ecs& ctx,
+            const std::map<entity, entity>& translation_table
+        ) = 0;
     };
 
     template<typename Component>
@@ -528,6 +549,14 @@ private:
         void clear(ecs& ctx) override;
         size_t count() const override;
         void update_search_index(ecs& ctx) override;
+
+        void list_entities(
+            std::map<entity, entity>& translation_table
+        ) override;
+        void concat(
+            ecs& ctx,
+            const std::map<entity, entity>& translation_table
+        ) override;
 
     private:
         void signal_add(ecs& ctx, entity id, Component* data);
@@ -972,6 +1001,28 @@ void ecs::clear_entities()
     id_counter = 0;
     reusable_ids.clear();
 }
+
+void ecs::concat(
+    ecs& other,
+    std::map<entity, entity>* translation_table_ptr
+){
+    std::map<entity, entity> translation_table;
+
+    for(auto& c: other.components)
+        if(c) c->list_entities(translation_table);
+
+    start_batch();
+    for(auto& pair: translation_table)
+        pair.second = add();
+
+    for(auto& c: other.components)
+        if(c) c->concat(*this, translation_table);
+    finish_batch();
+
+    if(translation_table_ptr)
+        *translation_table_ptr = std::move(translation_table);
+}
+
 
 template<typename Component>
 void ecs::reserve(size_t count)
@@ -1503,6 +1554,26 @@ template<typename Component>
 void ecs::component_container<Component>::update_search_index(ecs& ctx)
 {
     search.update(ctx);
+}
+
+template<typename Component>
+void ecs::component_container<Component>::list_entities(
+    std::map<entity, entity>& translation_table
+){
+    for(auto& c: components)
+        translation_table[c.id] = INVALID_ENTITY;
+}
+
+template<typename Component>
+void ecs::component_container<Component>::concat(
+    ecs& ctx,
+    const std::map<entity, entity>& translation_table
+){
+    if constexpr(std::is_copy_constructible_v<Component>)
+    {
+        for(auto& c: components)
+            ctx.attach(translation_table.at(c.id), Component{*c.get()});
+    }
 }
 
 template<typename Component>
