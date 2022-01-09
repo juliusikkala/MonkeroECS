@@ -297,6 +297,14 @@ public:
         std::map<entity, entity>* translation_table = nullptr
     );
 
+    /** Copies one entity from another ECS to this one.
+     * \param other the other ECS whose entity to copy to this.
+     * \param other_id the ID of the entity to copy in the other ECS.
+     * \return entity ID of the created entity.
+     * \warn You should finish batching on the other ECS before calling this.
+     */
+    inline entity copy(ecs& other, entity other_id);
+
     /** Starts batching behaviour for add/remove.
      * If you know you are going to do a lot of modifications to existing
      * entities (i.e. attaching new components to old entities or removing
@@ -480,6 +488,11 @@ private:
             ecs& ctx,
             const std::map<entity, entity>& translation_table
         ) = 0;
+        inline virtual void copy(
+            ecs& target,
+            entity result_id,
+            entity original_id
+        ) = 0;
     };
 
     template<typename Component>
@@ -556,6 +569,11 @@ private:
         void concat(
             ecs& ctx,
             const std::map<entity, entity>& translation_table
+        ) override;
+        void copy(
+            ecs& target,
+            entity result_id,
+            entity original_id
         ) override;
 
     private:
@@ -1021,6 +1039,16 @@ void ecs::concat(
 
     if(translation_table_ptr)
         *translation_table_ptr = std::move(translation_table);
+}
+
+entity ecs::copy(ecs& other, entity other_id)
+{
+    entity id = add();
+
+    for(auto& c: other.components)
+        if(c) c->copy(*this, id, other_id);
+
+    return id;
 }
 
 
@@ -1575,6 +1603,20 @@ void ecs::component_container<Component>::concat(
             ctx.attach(translation_table.at(c.id), Component{*c.get()});
     }
 }
+
+template<typename Component>
+void ecs::component_container<Component>::copy(
+    ecs& target,
+    entity result_id,
+    entity original_id
+){
+    if constexpr(std::is_copy_constructible_v<Component>)
+    {
+        Component* comp = get(original_id);
+        if(comp) target.attach(result_id, Component{*comp});
+    }
+}
+
 
 template<typename Component>
 void ecs::component_container<Component>::signal_add(ecs& ctx, entity id, Component* data)

@@ -50,3 +50,4 @@ test('components', executable('components', 'tests/components.cc', include_direc
 test('foreach', executable('foreach', 'tests/foreach.cc', include_directories: [incdir]))
 test('search', executable('search', 'tests/search.cc', include_directories: [incdir]))
 test('concat', executable('concat', 'tests/concat.cc', include_directories: [incdir]))
+test('copy', executable('copy', 'tests/copy.cc', include_directories: [incdir]))
