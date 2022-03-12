@@ -499,34 +499,35 @@ private:
     struct foreach_iterator_base;
 
     template<typename Component>
+    struct foreach_iterator;
+
+    template<typename Component>
     class component_container: public component_container_base
     {
         template<typename> friend struct foreach_iterator_base;
+        template<typename> friend struct foreach_iterator;
     public:
         struct component_tag
         {
             component_tag();
-            component_tag(entity id);
-            component_tag(entity id, Component&& c);
-            entity id;
+            component_tag(Component&& c);
 
             Component* get();
-            bool operator<(entity id) const;
         };
 
-        struct component_payload: component_tag
+        struct component_payload
         {
             component_payload();
-            component_payload(entity id, Component&& c);
+            component_payload(Component&& c);
             Component c;
 
             Component* get();
         };
 
-        struct component_indirect: component_tag
+        struct component_indirect
         {
             component_indirect();
-            component_indirect(entity id, Component* c);
+            component_indirect(Component* c);
             std::unique_ptr<Component> c;
 
             Component* get();
@@ -536,11 +537,32 @@ private:
             std::is_base_of_v<ptr_component, Component> ||
             std::is_polymorphic_v<Component>;
 
+        static constexpr bool use_empty =
+            std::is_empty_v<Component> && !use_indirect;
+
+        struct dummy_container
+        {
+            void resize(size_t size);
+            void reserve(size_t size);
+            void clear();
+            component_tag* begin();
+            void erase(component_tag*);
+            component_tag& emplace_back(component_tag&&);
+            component_tag* emplace(component_tag*, component_tag&&);
+            component_tag& operator[](size_t i) const;
+        };
+
         using component_data = std::conditional_t<
             use_indirect, component_indirect,
             std::conditional_t<
-                std::is_empty_v<Component>, component_tag, component_payload
+                use_empty,
+                component_tag,
+                component_payload
             >
+        >;
+
+        using component_storage = std::conditional_t<
+            use_empty, dummy_container, std::vector<component_data>
         >;
 
         Component* get(entity id);
@@ -581,9 +603,11 @@ private:
         void signal_remove(ecs& ctx, entity id, Component* data);
 
         search_index<Component> search;
-        std::vector<component_data> components;
-        std::vector<entity> pending_removal;
-        std::vector<component_data> pending_addition;
+        std::vector<entity> ids;
+        component_storage components;
+        std::vector<entity> pending_removal_ids;
+        std::vector<entity> pending_addition_ids;
+        component_storage pending_addition_components;
     };
 
     template<typename Component>
@@ -596,17 +620,11 @@ private:
 
         bool finished();
         inline void advance_up_to(entity id);
-        void id();
-        typename std::vector<
-            typename Container::component_data
-        >::iterator begin;
-        typename std::vector<
-            typename Container::component_data
-        >::iterator end;
-    };
+        entity get_id() const;
 
-    template<typename Component>
-    struct foreach_iterator;
+        Container* c;
+        size_t i;
+    };
 
     template<typename Component>
     struct foreach_iterator<Component&>: foreach_iterator_base<Component>
@@ -708,6 +726,13 @@ public:
 // Implementation
 //==============================================================================
 
+inline size_t lower_bound(std::vector<entity>& ids, entity id)
+{
+    // TODO: More optimal implementation than binary search is possible! Our
+    // list has the further limitation of no duplications. Also, should use SSE.
+    return std::lower_bound(ids.begin(), ids.end(), id)-ids.begin();
+}
+
 ecs::ecs()
 : id_counter(0), defer_batch(0)
 {
@@ -722,40 +747,43 @@ ecs::~ecs()
 
 template<typename Component>
 ecs::foreach_iterator_base<Component>::foreach_iterator_base(Container& c)
-: begin(c.components.begin()), end(c.components.end())
+: c(&c), i(0)
 {
 }
 
 template<typename Component>
 bool ecs::foreach_iterator_base<Component>::finished()
 {
-    return begin == end;
+    return i == c->ids.size();
 }
 
 template<typename Component>
 void ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
-    auto last = begin + std::min(entity(end - begin), (id - begin->id));
-    begin = std::lower_bound(begin + 1, last, id);
+    size_t last = i + std::min(entity(c->ids.size() - i), (id - c->ids[i]));
+    i = std::lower_bound(c->ids.begin()+i+1, c->ids.begin()+last, id)-c->ids.begin();
+}
+
+template<typename Component>
+entity ecs::foreach_iterator_base<Component>::get_id() const
+{
+    return c->ids[i];
 }
 
 template<typename Component>
 auto ecs::foreach_iterator<Component&>::get(entity) -> Type&
 {
-    return *foreach_iterator_base<Component>::begin->get();
+    return *this->c->components[this->i].get();
 }
 
 template<typename Component>
 auto ecs::foreach_iterator<Component*>::get(entity id) -> Type*
 {
-    if(
-        foreach_iterator_base<Component>::begin ==
-        foreach_iterator_base<Component>::end
-    ) return nullptr;
+    if(this->finished())
+        return nullptr;
 
-    auto& it = foreach_iterator_base<Component>::begin;
-    if(it->id != id) return nullptr;
-    return it->get();
+    if(this->c->ids[this->i] != id) return nullptr;
+    return this->c->components[this->i].get();
 }
 
 template<bool pass_id, typename... Components>
@@ -781,10 +809,10 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
         auto& iter = std::get<0>(component_it);
         while(!iter.finished())
         {
-            entity cur_id = iter.begin->id;
+            entity cur_id = iter.get_id();
             if constexpr(pass_id) f(cur_id, iter.get(cur_id));
             else f(iter.get(cur_id));
-            ++iter.begin;
+            ++iter.i;
         }
     }
     else if constexpr(all_optional)
@@ -795,14 +823,14 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
         while(monkero_apply_tuple(!it.finished() || ...))
         {
             entity cur_id = monkero_apply_tuple(std::min({
-                (it.begin == it.end ?
-                 std::numeric_limits<entity>::max() : it.begin->id)...
+                (it.finished() ?
+                 std::numeric_limits<entity>::max() : it.get_id())...
             }));
             if constexpr(pass_id) monkero_apply_tuple(f(cur_id, it.get(cur_id)...));
             else monkero_apply_tuple(f(it.get(cur_id)...));
             monkero_apply_tuple(
-                (it.begin != it.end && it.begin->id == cur_id
-                 ? (++it.begin, void()) : void()), ...
+                (!it.finished() && it.get_id() == cur_id
+                 ? (++it.i, void()) : void()), ...
             );
         }
     }
@@ -813,15 +841,15 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
         while(monkero_apply_tuple((!it.finished() || !it.required) && ...))
         {
             entity cur_id = monkero_apply_tuple(
-                std::max({(it.required ? it.begin->id : 0)...})
+                std::max({(it.required ? it.get_id() : 0)...})
             );
             // Check if all entries have the same id. For each entry that
             // doesn't, advance to the next id.
             bool all_required_equal = monkero_apply_tuple(
                 (it.required ?
-                    (it.begin->id == cur_id ?
+                    (it.get_id() == cur_id ?
                         true : (it.advance_up_to(cur_id), false)) :
-                    (it.begin == it.end || it.begin->id >= cur_id ?
+                    (it.finished() || it.get_id() >= cur_id ?
                         true : (it.advance_up_to(cur_id), true))) && ...
             );
             if(all_required_equal)
@@ -829,7 +857,7 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
                 if constexpr(pass_id)
                     monkero_apply_tuple(f(cur_id, it.get(cur_id)...));
                 else monkero_apply_tuple(f(it.get(cur_id)...));
-                monkero_apply_tuple((it.required ? ++it.begin, void(): void()), ...);
+                monkero_apply_tuple((it.required ? ++it.i, void(): void()), ...);
             }
         }
     }
@@ -1064,33 +1092,14 @@ ecs::component_container<Component>::component_tag::component_tag()
 }
 
 template<typename Component>
-ecs::component_container<Component>::component_tag::component_tag(entity id)
-: id(id)
-{
-}
-
-template<typename Component>
-ecs::component_container<Component>::component_tag::component_tag(
-    entity id, Component&&
-): id(id)
+ecs::component_container<Component>::component_tag::component_tag(Component&&)
 {
 }
 
 template<typename Component>
 Component* ecs::component_container<Component>::component_tag::get()
 {
-    // This is safe because the component_tag type is only used when Component
-    // is an empty struct! They cannot have real data so just giving a pointer
-    // to the id should be fine.
-    return reinterpret_cast<Component*>(&id);
-}
-
-template<typename Component>
-bool ecs::component_container<Component>::component_tag::operator<(
-    entity id
-) const
-{
-    return this->id < id;
+    return reinterpret_cast<Component*>(this);
 }
 
 template<typename Component>
@@ -1100,8 +1109,8 @@ ecs::component_container<Component>::component_payload::component_payload()
 
 template<typename Component>
 ecs::component_container<Component>::component_payload::component_payload(
-    entity id, Component&& c
-): component_tag(id), c(std::move(c))
+    Component&& c
+): c(std::move(c))
 {
 }
 
@@ -1118,8 +1127,8 @@ ecs::component_container<Component>::component_indirect::component_indirect()
 
 template<typename Component>
 ecs::component_container<Component>::component_indirect::component_indirect(
-    entity id, Component* c
-): component_tag(id), c(c)
+    Component* c
+): c(c)
 {
 }
 
@@ -1130,34 +1139,75 @@ Component* ecs::component_container<Component>::component_indirect::get()
 }
 
 template<typename Component>
+typename ecs::component_container<Component>::component_tag&
+ecs::component_container<Component>::dummy_container::operator[](size_t) const
+{
+    return *(component_tag*)this;
+}
+
+template<typename Component>
+void ecs::component_container<Component>::dummy_container::resize(size_t)
+{}
+
+template<typename Component>
+void ecs::component_container<Component>::dummy_container::reserve(size_t)
+{}
+
+template<typename Component>
+void ecs::component_container<Component>::dummy_container::clear()
+{}
+
+template<typename Component>
+typename ecs::component_container<Component>::component_tag*
+ecs::component_container<Component>::dummy_container::begin()
+{
+    return (component_tag*)this;
+}
+
+template<typename Component>
+void ecs::component_container<Component>::dummy_container::erase(component_tag*)
+{}
+
+template<typename Component>
+typename ecs::component_container<Component>::component_tag&
+ecs::component_container<Component>::dummy_container::emplace_back(component_tag&&)
+{
+    return operator[](0);
+}
+
+template<typename Component>
+typename ecs::component_container<Component>::component_tag*
+ecs::component_container<Component>::dummy_container::emplace(component_tag*, component_tag&&)
+{
+    return begin();
+}
+
+template<typename Component>
 Component* ecs::component_container<Component>::get(entity id)
 {
     // Check if this entity is pending for removal. If so, it doesn't really
     // exist anymore.
-    auto rit = std::lower_bound(
-        pending_removal.begin(), pending_removal.end(), id
-    );
-    if(rit != pending_removal.end() && *rit == id)
+    size_t i = lower_bound(pending_removal_ids, id);
+    if(i != pending_removal_ids.size() && pending_removal_ids[i] == id)
         return nullptr;
 
     // Check if pending_addition has it.
-    auto it = std::lower_bound(
-        pending_addition.begin(), pending_addition.end(), id
-    );
-    if(it != pending_addition.end() && it->id == id)
-        return it->get();
+    i = lower_bound(pending_addition_ids, id);
+    if(i != pending_addition_ids.size() && pending_addition_ids[i] == id)
+        return pending_addition_components[i].get();
 
     // Finally, check the big components vector has it.
-    it = std::lower_bound(components.begin(), components.end(), id);
-    if(it != components.end() && it->id == id)
-        return it->get();
+    i = lower_bound(ids, id);
+    if(i != ids.size() && ids[i] == id)
+        return components[i].get();
+
     return nullptr;
 }
 
 template<typename Component>
 entity ecs::component_container<Component>::get_entity(size_t index) const
 {
-    return components[index].id;
+    return ids[index];
 }
 
 template<typename Component>
@@ -1260,15 +1310,13 @@ void ecs::component_container<Component>::native_add(
     {
         // Check if this entity is already pending for removal. Remove from
         // that vector first if so.
-        auto rit = std::lower_bound(
-            pending_removal.begin(), pending_removal.end(), id);
-        if(rit != pending_removal.end() && *rit == id)
-            pending_removal.erase(rit);
+        size_t i = lower_bound(pending_removal_ids, id);
+        if(i != pending_removal_ids.size() && pending_removal_ids[i] == id)
+            pending_removal_ids.erase(pending_removal_ids.begin() + i);
 
         // Then, add to pending_addition too, if not there yet.
-        auto it = std::lower_bound(
-            pending_addition.begin(), pending_addition.end(), id);
-        if(it == pending_addition.end() || it->id != id)
+        i = lower_bound(pending_addition_ids, id);
+        if(i == pending_addition_ids.size() || pending_addition_ids[i] != id)
         {
             // Skip the search if nobody cares.
             if(
@@ -1277,46 +1325,50 @@ void ecs::component_container<Component>::native_add(
             ){
                 // If this entity already exists in the components, signal the
                 // removal of the previous one.
-                auto it = std::lower_bound(
-                    components.begin(), components.end(), id
-                );
-                if(it != components.end() && it->id == id)
-                    signal_remove(ctx, id, it->get());
+                size_t j = lower_bound(ids, id);
+                if(j != ids.size() && ids[j] == id)
+                    signal_remove(ctx, id, components[j].get());
             }
 
-            signal_add(
-                ctx, id, pending_addition.emplace(it, id, std::move(c))->get()
+            pending_addition_ids.emplace(pending_addition_ids.begin()+i, id);
+            auto cit = pending_addition_components.emplace(
+                pending_addition_components.begin()+i,
+                std::move(c)
             );
+            signal_add(ctx, id, cit->get());
         }
         else
         {
-            signal_remove(ctx, id, it->get());
-            *it = component_data(id, std::move(c));
-            signal_add(ctx, id, it->get());
+            signal_remove(ctx, id, pending_addition_components[i].get());
+            pending_addition_components[i] = component_data(std::move(c));
+            signal_add(ctx, id, pending_addition_components[i].get());
         }
     }
     else
     {
         // If we can take the fast path of just dumping at the back, do it.
-        if(components.size() == 0 || components.back().id < id)
+        if(ids.size() == 0 || ids.back() < id)
         {
-            signal_add(
-                ctx, id, components.emplace_back(id, std::move(c)).get()
-            );
+            ids.emplace_back(id);
+            auto& component = components.emplace_back(std::move(c));
+            signal_add(ctx, id, component.get());
         }
         else
         {
-            auto it = std::lower_bound(
-                components.begin(), components.end(), id);
-            if(it->id != id)
+            size_t i = lower_bound(ids, id);
+            if(ids[i] != id)
+            {
+                ids.emplace(ids.begin() + i, id);
+                auto cit = components.emplace(components.begin()+i, std::move(c));
                 signal_add(
-                    ctx, id, components.emplace(it, id, std::move(c))->get()
+                    ctx, id, cit->get()
                 );
+            }
             else
             {
-                signal_remove(ctx, id, it->get());
-                *it = component_data(id, std::move(c));
-                signal_add(ctx, id, it->get());
+                signal_remove(ctx, id, components[i].get());
+                components[i] = component_data(std::move(c));
+                signal_add(ctx, id, components[i].get());
             }
         }
     }
@@ -1358,9 +1410,11 @@ void ecs::component_container<Component>::add(
 template<typename Component>
 void ecs::component_container<Component>::reserve(size_t count)
 {
+    ids.reserve(count);
     components.reserve(count);
-    pending_removal.reserve(count);
-    pending_addition.reserve(count);
+    pending_removal_ids.reserve(count);
+    pending_addition_ids.reserve(count);
+    pending_addition_components.reserve(count);
 }
 
 template<typename Component>
@@ -1373,47 +1427,53 @@ void ecs::component_container<Component>::remove(ecs& ctx, entity id)
     {
         // Check if this entity is already pending for addition. Remove from
         // there first if so.
-        auto ait = std::lower_bound(
-            pending_addition.begin(), pending_addition.end(), id);
-        if(ait != pending_addition.end() && ait->id == id)
+        size_t i = lower_bound(pending_addition_ids, id);
+        if(i != pending_addition_ids.size() && pending_addition_ids[i] == id)
         {
             if(do_emit)
             {
-                component_data tmp = std::move(*ait);
-                pending_addition.erase(ait);
+                auto tmp = std::move(pending_addition_components[i]);
+                pending_addition_ids.erase(pending_addition_ids.begin() + i);
+                pending_addition_components.erase(pending_addition_components.begin() + i);
                 signal_remove(ctx, id, tmp.get());
             }
-            else pending_addition.erase(ait);
+            else
+            {
+                pending_addition_ids.erase(pending_addition_ids.begin() + i);
+                pending_addition_components.erase(pending_addition_components.begin() + i);
+            }
         }
 
         // Then, add to proper removal too, if not there yet.
-        auto it = std::lower_bound(
-            pending_removal.begin(), pending_removal.end(), id);
-        if(it == pending_removal.end() || *it != id)
+        i = lower_bound(pending_removal_ids, id);
+        if(i == pending_removal_ids.size() || pending_removal_ids[i] != id)
         {
-            pending_removal.insert(it, id);
+            pending_removal_ids.insert(pending_removal_ids.begin() + i, id);
             if(do_emit)
             {
-                auto cit = std::lower_bound(
-                    components.begin(), components.end(), id);
-                if(cit != components.end() && cit->id == id)
-                    signal_remove(ctx, id, cit->get());
+                size_t j = lower_bound(ids, id);
+                if(j != ids.size() && ids[j] == id)
+                    signal_remove(ctx, id, components[j].get());
             }
         }
     }
     else
     {
-        auto it = std::lower_bound(
-            components.begin(), components.end(), id);
-        if(it != components.end() && it->id == id)
+        size_t i = lower_bound(ids, id);
+        if(i != ids.size() && ids[i] == id)
         {
             if(do_emit)
             {
-                component_data tmp = std::move(*it);
-                components.erase(it);
+                auto tmp = std::move(components[i]);
+                ids.erase(ids.begin() + i);
+                components.erase(components.begin() + i);
                 signal_remove(ctx, id, tmp.get());
             }
-            else components.erase(it);
+            else
+            {
+                ids.erase(ids.begin() + i);
+                components.erase(components.begin() + i);
+            }
         }
     }
 }
@@ -1422,121 +1482,147 @@ template<typename Component>
 void ecs::component_container<Component>::resolve_pending()
 {
     // Start by removing.
-    if(pending_removal.size() != 0)
+    if(pending_removal_ids.size() != 0)
     {
-        auto pit = pending_removal.begin();
+        size_t pi = 0;
         // Start iterating from the last element <= first id to be removed.
-        // This could just be components.begin(), but this should help with
+        // This could just be 0, but this should help with
         // performance in the common-ish case where most transient entities are
         // also the most recently added ones.
-        auto rit = std::lower_bound(components.begin(), components.end(), *pit);
-        auto wit = rit;
+        size_t ri = lower_bound(ids, pending_removal_ids[pi]);
+        size_t wi = ri;
         int removed_count = 0;
 
-        while(pit != pending_removal.end() && rit != components.end())
+        while(pi != pending_removal_ids.size() && ri != ids.size())
         {
             // If this id is equal, this is the entry that should be removed.
-            if(*pit == rit->id)
+            if(pending_removal_ids[pi] == ids[ri])
             {
-                pit++;
-                rit++;
+                pi++;
+                ri++;
                 removed_count++;
             }
             // Skip all pending removals that aren't be in the list.
-            else if(*pit < rit->id)
+            else if(pending_removal_ids[pi] < ids[ri])
             {
-                pit++;
+                pi++;
             }
-            else if(rit->id < *pit)
+            else if(ids[ri] < pending_removal_ids[pi])
             {
                 // Compact the vector.
-                if(wit != rit)
-                    *wit = std::move(*rit);
+                if(wi != ri)
+                {
+                    components[wi] = std::move(components[ri]);
+                    ids[wi] = ids[ri];
+                }
 
                 // Advance to the next entry.
-                ++wit;
-                ++rit;
+                ++wi;
+                ++ri;
             }
         }
 
         if(removed_count != 0)
-            while(rit != components.end())
+            while(ri != ids.size())
             {
-                *wit = std::move(*rit);
-                ++wit;
-                ++rit;
+                components[wi] = std::move(components[ri]);
+                ids[wi] = ids[ri];
+                ++wi;
+                ++ri;
             }
 
-        components.resize(components.size()-removed_count);
-        pending_removal.clear();
+        ids.resize(ids.size()-removed_count);
+        components.resize(ids.size());
+        pending_removal_ids.clear();
     }
 
     // There are two routes for addition, the fast one is for adding at the end,
     // which is the most common use case.
     if(
-        pending_addition.size() != 0 && (
-            components.size() == 0 ||
-            components.back().id < pending_addition.front().id
+        pending_addition_ids.size() != 0 && (
+            ids.size() == 0 || ids.back() < pending_addition_ids.front()
         )
     ){  // Fast route, only used when all additions are after the last
         // already-extant entity.
-        size_t needed_size = components.size() + pending_addition.size();
-        if(components.capacity() < needed_size)
-            components.reserve(std::max(components.capacity() * 2, needed_size));
-        for(component_data& d: pending_addition)
-            components.emplace_back(std::move(d));
-        pending_addition.clear();
+        size_t needed_size = ids.size() + pending_addition_ids.size();
+        if(ids.capacity() < needed_size)
+        {
+            components.reserve(std::max(ids.capacity() * 2, needed_size));
+            ids.reserve(std::max(ids.capacity() * 2, needed_size));
+        }
+        for(size_t i = 0; i < pending_addition_ids.size(); ++i)
+        {
+            components.emplace_back(std::move(pending_addition_components[i]));
+            ids.emplace_back(pending_addition_ids[i]);
+        }
+        pending_addition_ids.clear();
+        pending_addition_components.clear();
     }
-    else if(pending_addition.size() != 0)
+    else if(pending_addition_ids.size() != 0)
     { // Slow route, handles duplicates and interleaved additions.
         // Handle duplicates first.
         {
-            auto pit = pending_addition.begin();
-            auto wit = components.begin();
-            while(pit != pending_addition.end() && wit != components.end())
+            size_t pi = 0;
+            size_t wi = 0;
+            while(pi != pending_addition_ids.size() && wi != ids.size())
             {
-                if(pit->id == wit->id)
+                if(pending_addition_ids[pi] == ids[wi])
                 {
-                    *wit = std::move(*pit);
-                    pit = pending_addition.erase(pit);
-                    ++wit;
+                    components[wi] = std::move(pending_addition_components[pi]);
+                    ids[wi] = pending_addition_ids[pi];
+                    // TODO: We should probably avoid these erases, they're
+                    // likely slow.
+                    pending_addition_ids.erase(pending_addition_ids.begin() + pi);
+                    pending_addition_components.erase(pending_addition_components.begin() + pi);
+                    ++wi;
                 }
-                else if(pit->id < wit->id) ++pit;
-                else ++wit;
+                else if(pending_addition_ids[pi] < ids[wi]) ++pi;
+                else ++wi;
             }
         }
 
         // If something is still left, actually perform additions.
-        if(pending_addition.size() != 0)
+        if(pending_addition_ids.size() != 0)
         {
-            components.resize(components.size() + pending_addition.size());
+            ids.resize(ids.size() + pending_addition_ids.size());
+            components.resize(ids.size());
 
-            auto pit = pending_addition.rbegin();
-            auto wit = components.rbegin();
-            auto rit = wit+pending_addition.size();
+            size_t pi = 0;
+            size_t wi = 0;
+            size_t ri = wi+pending_addition_ids.size();
 
-            while(pit != pending_addition.rend() && rit != components.rend())
+            while(pi != pending_addition_ids.size() && ri != ids.size())
             {
-                if(pit->id > rit->id)
+                size_t pir = pending_addition_ids.size()-1-pi;
+                size_t rir = ids.size()-1-ri;
+                size_t wir = ids.size()-1-wi;
+
+                if(pending_addition_ids[pir] > ids[rir])
                 {
-                    *wit = std::move(*pit);
-                    ++pit;
+                    components[wir] = std::move(pending_addition_components[pir]);
+                    ids[wir] = pending_addition_ids[pir];
+                    ++pi;
                 }
                 else
                 {
-                    *wit = std::move(*rit);
-                    ++rit;
+                    components[wir] = std::move(components[rir]);
+                    ids[wir] = ids[rir];
+                    ++ri;
                 }
-                ++wit;
+                ++wi;
             }
 
-            while(pit != pending_addition.rend())
+            while(pi != pending_addition_ids.size())
             {
-                *wit = std::move(*pit);
-                ++pit;
-                ++wit;
+                size_t pir = pending_addition_ids.size()-1-pi;
+                size_t wir = ids.size()-1-wi;
+                components[wir] = std::move(pending_addition_components[pir]);
+                ids[wir] = pending_addition_ids[pir];
+                ++pi;
+                ++wi;
             }
-            pending_addition.clear();
+            pending_addition_ids.clear();
+            pending_addition_components.clear();
         }
     }
 }
@@ -1551,31 +1637,37 @@ void ecs::component_container<Component>::clear(ecs& ctx)
     {
         // If batching, we can't actually clear everything now. We will simply
         // have to queue everything for removal.
-        for(component_data& d: pending_addition) remove(ctx, d.id);
-        for(component_data& d: components) remove(ctx, d.id);
+        while(pending_addition_ids.size() > 0)
+            remove(ctx, pending_addition_ids.back());
+        for(entity id: ids)
+            remove(ctx, id);
     }
     else if(!do_emit)
     {
         // If we aren't going to emit anything and we don't batch, life is easy.
+        ids.clear();
         components.clear();
-        pending_removal.clear();
-        pending_addition.clear();
+        pending_removal_ids.clear();
+        pending_addition_ids.clear();
+        pending_addition_components.clear();
     }
     else
     {
         // The most difficult case, we don't batch but we still need to emit.
-        std::vector<component_data> tmp(std::move(components));
+        auto tmp_ids(std::move(ids));
+        auto tmp_components(std::move(components));
+        ids.clear();
         components.clear();
 
-        for(component_data& d: tmp)
-            signal_remove(ctx, d.id, d.get());
+        for(size_t i = 0; i < tmp_ids.size(); ++i)
+            signal_remove(ctx, tmp_ids[i], tmp_components[i].get());
     }
 }
 
 template<typename Component>
 size_t ecs::component_container<Component>::count() const
 {
-    return components.size();
+    return ids.size();
 }
 
 template<typename Component>
@@ -1588,8 +1680,8 @@ template<typename Component>
 void ecs::component_container<Component>::list_entities(
     std::map<entity, entity>& translation_table
 ){
-    for(auto& c: components)
-        translation_table[c.id] = INVALID_ENTITY;
+    for(entity id: ids)
+        translation_table[id] = INVALID_ENTITY;
 }
 
 template<typename Component>
@@ -1599,8 +1691,8 @@ void ecs::component_container<Component>::concat(
 ){
     if constexpr(std::is_copy_constructible_v<Component>)
     {
-        for(auto& c: components)
-            ctx.attach(translation_table.at(c.id), Component{*c.get()});
+        for(size_t i = 0; i < ids.size(); ++i)
+            ctx.attach(translation_table.at(ids[i]), Component{*components[i].get()});
     }
 }
 
