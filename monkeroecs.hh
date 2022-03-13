@@ -618,9 +618,10 @@ private:
 
         foreach_iterator_base(Container& c);
 
-        bool finished();
-        inline void advance_up_to(entity id);
-        entity get_id() const;
+        inline bool finished();
+        inline entity advance_up_to(entity id);
+        inline entity advance_one();
+        inline entity get_id() const;
 
         Container* c;
         size_t i;
@@ -758,10 +759,18 @@ bool ecs::foreach_iterator_base<Component>::finished()
 }
 
 template<typename Component>
-void ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
+entity ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
     size_t last = i + std::min(entity(c->ids.size() - i), (id - c->ids[i]));
     i = std::lower_bound(c->ids.begin()+i+1, c->ids.begin()+last, id)-c->ids.begin();
+    return i != c->ids.size() ? c->ids[i] : INVALID_ENTITY;
+}
+
+template<typename Component>
+entity ecs::foreach_iterator_base<Component>::advance_one()
+{
+    ++i;
+    return i != c->ids.size() ? c->ids[i] : INVALID_ENTITY;
 }
 
 template<typename Component>
@@ -836,19 +845,19 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
     }
     else
     {
+        entity cur_id = monkero_apply_tuple(
+            std::max({(it.required ? it.get_id() : 0)...})
+        );
         // This is the generic implementation for when there's multiple
         // components where some are potentially optional.
-        while(monkero_apply_tuple((!it.finished() || !it.required) && ...))
+        while(cur_id != INVALID_ENTITY)
         {
-            entity cur_id = monkero_apply_tuple(
-                std::max({(it.required ? it.get_id() : 0)...})
-            );
             // Check if all entries have the same id. For each entry that
             // doesn't, advance to the next id.
             bool all_required_equal = monkero_apply_tuple(
                 (it.required ?
                     (it.get_id() == cur_id ?
-                        true : (it.advance_up_to(cur_id), false)) :
+                        true : ((cur_id = it.advance_up_to(cur_id)), false)) :
                     (it.finished() || it.get_id() >= cur_id ?
                         true : (it.advance_up_to(cur_id), true))) && ...
             );
@@ -857,7 +866,7 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
                 if constexpr(pass_id)
                     monkero_apply_tuple(f(cur_id, it.get(cur_id)...));
                 else monkero_apply_tuple(f(it.get(cur_id)...));
-                monkero_apply_tuple((it.required ? ++it.i, void(): void()), ...);
+                monkero_apply_tuple((it.required ? (cur_id = std::max(cur_id, it.advance_one())), void(): void()), ...);
             }
         }
     }
