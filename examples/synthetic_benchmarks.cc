@@ -101,7 +101,7 @@ void test_iteration()
     monkero::ecs ecs;
     std::default_random_engine rng(0);
     std::uniform_int_distribution<int> dist1(0, 1);
-    std::uniform_int_distribution<int> dist2(0, 50);
+    std::uniform_int_distribution<int> dist2(0, 1);
 
     // Populate ECS.
     size_t N = 1<<22;
@@ -111,7 +111,7 @@ void test_iteration()
         monkero::entity id = ecs.add();
         if(dist2(rng)==0) ecs.attach(id, tag{});
         if(dist1(rng)==0) ecs.attach(id, small{2});
-        if(dist2(rng)==0) ecs.attach(id, large{2, {}});
+        if(dist1(rng)==0) ecs.attach(id, large{2, {}});
         if(dist1(rng)==0) ecs.attach(id, ptr{{}, 2});
         ids.push_back(id);
     }

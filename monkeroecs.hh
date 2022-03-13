@@ -635,6 +635,7 @@ private:
         entity* ids;
         entity* begin;
         entity* end;
+        bool dense;
     };
 
     template<typename Component>
@@ -758,7 +759,8 @@ ecs::~ecs()
 
 template<typename Component>
 ecs::foreach_iterator_base<Component>::foreach_iterator_base(Container& c)
-: components(c.components.data()), ids(c.ids.data()), begin(ids), end(ids+c.ids.size())
+:   components(c.components.data()), ids(c.ids.data()), begin(ids),
+    end(ids+c.ids.size()), dense(false)
 {
 }
 
@@ -771,10 +773,14 @@ bool ecs::foreach_iterator_base<Component>::finished()
 template<typename Component>
 entity ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
-    /*
-    entity* cache_line_end = (entity*)((((uintptr_t)begin)&CACHE_LINE_MASK) + CACHE_LINE_SIZE*2);
-    ++begin;
-    if(cache_line_end >= end)
+    if(dense)
+    {
+        ++begin;
+        entity* last = std::min(end, begin + (id - *begin));
+        begin = std::lower_bound(begin, last, id);
+        return begin != end ? *begin : INVALID_ENTITY;
+    }
+    else
     {
         for(; begin < end; ++begin)
         {
@@ -783,27 +789,6 @@ entity ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
         }
         return INVALID_ENTITY;
     }
-    else
-    {
-        for(; begin < cache_line_end; ++begin)
-        {
-            if(*begin >= id)
-                return *begin;
-        }
-        entity* last = std::min(end, begin + (id - *begin));
-        begin = std::lower_bound(begin, last, id);
-        return begin != end ? *begin : INVALID_ENTITY;
-    }
-    */
-    // I still haven't managed to find a case where the complicated approach
-    // above would be faster :/
-    ++begin;
-    for(; begin < end; ++begin)
-    {
-        if(*begin >= id)
-            return *begin;
-    }
-    return INVALID_ENTITY;
 }
 
 template<typename Component>
@@ -884,6 +869,12 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
     }
     else
     {
+        ssize_t min_dense_length = monkero_apply_tuple(std::min({
+            (it.required ? it.end - it.begin : INVALID_ENTITY)...
+        })) * CACHE_LINE_SIZE;
+        monkero_apply_tuple(
+            (min_dense_length < it.end - it.begin ? (it.dense = true) : (it.dense = false)), ...
+        );
         entity cur_id = monkero_apply_tuple(std::max({
             (it.required ? (it.finished() ? INVALID_ENTITY : it.get_id()) : 0)...
         }));
