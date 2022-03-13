@@ -71,6 +71,9 @@ namespace monkero
 using entity = uint32_t;
 inline constexpr entity INVALID_ENTITY = std::numeric_limits<entity>::max();
 
+inline constexpr uint32_t CACHE_LINE_SIZE = 64;
+inline constexpr uintptr_t CACHE_LINE_MASK = ~(uintptr_t)(CACHE_LINE_SIZE-1);
+
 /** A base class for components which need to have unchanging memory addresses.
  * Derive from this if you want to have an extra layer of indirection in the
  * storage of this component. What this allows is no move or copy constructor
@@ -768,9 +771,39 @@ bool ecs::foreach_iterator_base<Component>::finished()
 template<typename Component>
 entity ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
-    entity* last = begin + std::min(entity(end - begin), (id - *begin));
-    begin = std::lower_bound(begin+1, last, id);
-    return begin != end ? *begin : INVALID_ENTITY;
+    /*
+    entity* cache_line_end = (entity*)((((uintptr_t)begin)&CACHE_LINE_MASK) + CACHE_LINE_SIZE*2);
+    ++begin;
+    if(cache_line_end >= end)
+    {
+        for(; begin < end; ++begin)
+        {
+            if(*begin >= id)
+                return *begin;
+        }
+        return INVALID_ENTITY;
+    }
+    else
+    {
+        for(; begin < cache_line_end; ++begin)
+        {
+            if(*begin >= id)
+                return *begin;
+        }
+        entity* last = std::min(end, begin + (id - *begin));
+        begin = std::lower_bound(begin, last, id);
+        return begin != end ? *begin : INVALID_ENTITY;
+    }
+    */
+    // I still haven't managed to find a case where the complicated approach
+    // above would be faster :/
+    ++begin;
+    for(; begin < end; ++begin)
+    {
+        if(*begin >= id)
+            return *begin;
+    }
+    return INVALID_ENTITY;
 }
 
 template<typename Component>
@@ -839,8 +872,7 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
         while(monkero_apply_tuple(!it.finished() || ...))
         {
             entity cur_id = monkero_apply_tuple(std::min({
-                (it.finished() ?
-                 std::numeric_limits<entity>::max() : it.get_id())...
+                (it.finished() ? INVALID_ENTITY : it.get_id())...
             }));
             if constexpr(pass_id) monkero_apply_tuple(f(cur_id, it.get(cur_id)...));
             else monkero_apply_tuple(f(it.get(cur_id)...));
@@ -852,9 +884,9 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
     }
     else
     {
-        entity cur_id = monkero_apply_tuple(
-            std::max({(it.required ? it.get_id() : 0)...})
-        );
+        entity cur_id = monkero_apply_tuple(std::max({
+            (it.required ? (it.finished() ? INVALID_ENTITY : it.get_id()) : 0)...
+        }));
         // This is the generic implementation for when there's multiple
         // components where some are potentially optional.
         while(cur_id != INVALID_ENTITY)

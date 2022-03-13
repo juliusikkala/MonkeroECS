@@ -100,18 +100,19 @@ void test_iteration()
 {
     monkero::ecs ecs;
     std::default_random_engine rng(0);
-    std::uniform_int_distribution<int> dist(0, 10);
+    std::uniform_int_distribution<int> dist1(0, 1);
+    std::uniform_int_distribution<int> dist2(0, 50);
 
     // Populate ECS.
-    size_t N = 1<<24;
+    size_t N = 1<<22;
     std::vector<monkero::entity> ids;
     for(size_t i = 0; i < N; ++i)
     {
         monkero::entity id = ecs.add();
-        if(dist(rng)==0) ecs.attach(id, tag{});
-        if(dist(rng)==0) ecs.attach(id, small{2});
-        if(dist(rng)==0) ecs.attach(id, large{2, {}});
-        if(dist(rng)==0) ecs.attach(id, ptr{{}, 2});
+        if(dist2(rng)==0) ecs.attach(id, tag{});
+        if(dist1(rng)==0) ecs.attach(id, small{2});
+        if(dist2(rng)==0) ecs.attach(id, large{2, {}});
+        if(dist1(rng)==0) ecs.attach(id, ptr{{}, 2});
         ids.push_back(id);
     }
 
@@ -167,7 +168,7 @@ void test_iteration()
 
     start = std::chrono::high_resolution_clock::now();
     total = 1;
-    size_t sum = 1;
+    size_t sum = 0;
     for(size_t i = 0; i < M; ++i)
     {
         ecs([&](tag& t1, small& t2, large& t3, ptr& t4){
