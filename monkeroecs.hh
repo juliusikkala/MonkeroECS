@@ -547,6 +547,7 @@ private:
             void clear();
             component_tag* begin();
             void erase(component_tag*);
+            dummy_container data();
             component_tag& emplace_back(component_tag&&);
             component_tag* emplace(component_tag*, component_tag&&);
             component_tag& operator[](size_t i) const;
@@ -563,6 +564,10 @@ private:
 
         using component_storage = std::conditional_t<
             use_empty, dummy_container, std::vector<component_data>
+        >;
+
+        using component_array = std::conditional_t<
+            use_empty, dummy_container, component_data*
         >;
 
         Component* get(entity id);
@@ -623,8 +628,10 @@ private:
         inline entity advance_one();
         inline entity get_id() const;
 
-        Container* c;
-        size_t i;
+        typename Container::component_array components;
+        entity* ids;
+        entity* begin;
+        entity* end;
     };
 
     template<typename Component>
@@ -748,41 +755,41 @@ ecs::~ecs()
 
 template<typename Component>
 ecs::foreach_iterator_base<Component>::foreach_iterator_base(Container& c)
-: c(&c), i(0)
+: components(c.components.data()), ids(c.ids.data()), begin(ids), end(ids+c.ids.size())
 {
 }
 
 template<typename Component>
 bool ecs::foreach_iterator_base<Component>::finished()
 {
-    return i == c->ids.size();
+    return begin == end;
 }
 
 template<typename Component>
 entity ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
 {
-    size_t last = i + std::min(entity(c->ids.size() - i), (id - c->ids[i]));
-    i = std::lower_bound(c->ids.begin()+i+1, c->ids.begin()+last, id)-c->ids.begin();
-    return i != c->ids.size() ? c->ids[i] : INVALID_ENTITY;
+    entity* last = begin + std::min(entity(end - begin), (id - *begin));
+    begin = std::lower_bound(begin+1, last, id);
+    return begin != end ? *begin : INVALID_ENTITY;
 }
 
 template<typename Component>
 entity ecs::foreach_iterator_base<Component>::advance_one()
 {
-    ++i;
-    return i != c->ids.size() ? c->ids[i] : INVALID_ENTITY;
+    ++begin;
+    return begin != end ? *begin : INVALID_ENTITY;
 }
 
 template<typename Component>
 entity ecs::foreach_iterator_base<Component>::get_id() const
 {
-    return c->ids[i];
+    return *begin;
 }
 
 template<typename Component>
 auto ecs::foreach_iterator<Component&>::get(entity) -> Type&
 {
-    return *this->c->components[this->i].get();
+    return *this->components[this->begin-this->ids].get();
 }
 
 template<typename Component>
@@ -791,8 +798,8 @@ auto ecs::foreach_iterator<Component*>::get(entity id) -> Type*
     if(this->finished())
         return nullptr;
 
-    if(this->c->ids[this->i] != id) return nullptr;
-    return this->c->components[this->i].get();
+    if(*this->begin != id) return nullptr;
+    return this->components[this->begin-this->ids].get();
 }
 
 template<bool pass_id, typename... Components>
@@ -821,7 +828,7 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
             entity cur_id = iter.get_id();
             if constexpr(pass_id) f(cur_id, iter.get(cur_id));
             else f(iter.get(cur_id));
-            ++iter.i;
+            iter.advance_one();
         }
     }
     else if constexpr(all_optional)
@@ -839,7 +846,7 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
             else monkero_apply_tuple(f(it.get(cur_id)...));
             monkero_apply_tuple(
                 (!it.finished() && it.get_id() == cur_id
-                 ? (++it.i, void()) : void()), ...
+                 ? (it.advance_one(), void()) : void()), ...
             );
         }
     }
@@ -1176,6 +1183,10 @@ ecs::component_container<Component>::dummy_container::begin()
 template<typename Component>
 void ecs::component_container<Component>::dummy_container::erase(component_tag*)
 {}
+
+template<typename Component>
+typename ecs::component_container<Component>::dummy_container
+ecs::component_container<Component>::dummy_container::data() { return {}; }
 
 template<typename Component>
 typename ecs::component_container<Component>::component_tag&
