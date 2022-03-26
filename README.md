@@ -7,21 +7,29 @@ engine project.
 Features:
 - No entity count limits (other than 32-bit entity index)
 - Only depends on standard library 
+- Component addresses never change during their lifetime
 - Events
 - Dependencies
   - Components can depend on other components which will be added automatically
     if not present already
 - Flexible but simple-to-use foreach
-- Efficient multi-component iteration
+- Very efficient multi-component iteration
 - Memory-efficient handling of tag components
-- Batched modification
+- Batched modification that lets you safely add & remove components while you
+  iterate
 - Unit tests included
+- Constant-time component lookup and remove (& insert that is constant-time in practice, but not in theory ;))
 
 In the interest of saving your time, here's a list of common game dev deal-breakers:
-- Uses RTTI (not in components though) & STL (std::vector only) & lots of templates
+- Uses RTTI
+  - Not in components themselves though, but used with type-erasure with
+    internal component containers.
+- Uses STL
+  - std::vector for some mandatory parts
+  - std::map temporarily for certain rare operations like concat and copy
+- Lots of templates
 - Some potentially slow-to-include standard library headers
-- Looking up individual components by entity id is logarithmic
-- Thread-oblivious
+- Thread-oblivious for now
 
 ## Integration
 
