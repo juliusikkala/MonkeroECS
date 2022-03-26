@@ -19,7 +19,6 @@ struct test_event_3
 
 struct test_component_tag {};
 struct test_component_normal { int a; };
-struct test_component_ptr: ptr_component { int a; };
 
 struct test_system_1: receiver<test_event_1>
 {
@@ -49,14 +48,11 @@ struct test_system_2: receiver<test_event_1, test_event_2>
 struct lifetime_tester: receiver<
     add_component<test_component_tag>,
     add_component<test_component_normal>,
-    add_component<test_component_ptr>,
     remove_component<test_component_tag>,
-    remove_component<test_component_normal>,
-    remove_component<test_component_ptr>
+    remove_component<test_component_normal>
 > {
     int tag_count = 0;
     int normal_count = 0;
-    int ptr_count = 0;
     entity expected_id = INVALID_ENTITY;
 
     void handle(ecs&, const add_component<test_component_tag>& e) override
@@ -73,13 +69,6 @@ struct lifetime_tester: receiver<
         test(e.data != nullptr);
     }
 
-    void handle(ecs&, const add_component<test_component_ptr>& e) override
-    {
-        ptr_count++;
-        test(e.id == expected_id);
-        test(e.data != nullptr);
-    }
-
     void handle(ecs&, const remove_component<test_component_tag>& e) override
     {
         tag_count--;
@@ -90,13 +79,6 @@ struct lifetime_tester: receiver<
     void handle(ecs&, const remove_component<test_component_normal>& e) override
     {
         normal_count--;
-        test(e.id == expected_id);
-        test(e.data != nullptr);
-    }
-
-    void handle(ecs&, const remove_component<test_component_ptr>& e) override
-    {
-        ptr_count--;
         test(e.id == expected_id);
         test(e.data != nullptr);
     }
@@ -179,13 +161,11 @@ int main()
             entity id = lt.expected_id = e.add();
             e.attach(id, test_component_tag{});
             e.attach(id, test_component_normal{1});
-            e.attach(id, test_component_ptr{{}, 1});
             ids.push_back(id);
         }
         if(attempt == 1) e.finish_batch();
         test(lt.tag_count == N);
         test(lt.normal_count == N);
-        test(lt.ptr_count == N);
 
         std::random_device rd;
         std::mt19937 g(rd());
@@ -196,12 +176,10 @@ int main()
             lt.expected_id = id;
             e.remove<test_component_tag>(id);
             e.remove<test_component_normal>(id);
-            e.remove<test_component_ptr>(id);
         }
         if(attempt == 1 || attempt == 2) e.finish_batch();
         test(lt.tag_count == 0);
         test(lt.normal_count == 0);
-        test(lt.ptr_count == 0);
     }
 
 

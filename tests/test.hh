@@ -1,6 +1,6 @@
 #ifndef TEST_HH
 #define TEST_HH
-#include "monkeroecs.hh"
+#include "ecs.hh"
 #include <cstdio>
 #include <cstdlib>
 

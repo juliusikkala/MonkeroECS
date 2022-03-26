@@ -6,7 +6,7 @@
 
 struct test_component_tag { test_component_tag(int = 123){} };
 struct test_component_normal { test_component_normal(int a = 123): a(a) {} int a; };
-struct test_component_ptr: ptr_component { test_component_ptr(int a = 123): a(a) {} int a; };
+struct test_component_ptr { test_component_ptr(int a = 123): a(a) {} int a; };
 
 int main()
 {

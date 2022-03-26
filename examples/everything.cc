@@ -1,6 +1,6 @@
 // This example just showcases all features without any reasonable logic, the
 // resulting program isn't cohesive at all. Maybe useful for copypasta?
-#include "monkeroecs.hh"
+#include "ecs.hh"
 #include <cstdlib>
 #include <iostream>
 
@@ -21,13 +21,6 @@ struct tagcomponent {};
 struct dependent: public monkero::dependency_components<mycomponent, tagcomponent>
 {
     int value2 = 3;
-};
-
-// ptr_component is a way to handle components whose address must not change
-// after creation.
-struct dangerous: public monkero::ptr_component
-{
-    int everyone_and_their_dogs_have_a_pointer_to_me;
 };
 
 // This one is used as an event. There's nothing special about it either, no
@@ -165,11 +158,6 @@ int main()
     // component type.
     if(m) m->value = 42;
 
-    // (Optional!) You can reserve space for N components ahead of time. This
-    // is a good idea for performance, especially if you know the maximum
-    // number or even the usual amount.
-    ecs.reserve<mycomponent>(1000);
-
     // Let's add a bunch of entities!
     for(int i = 0; i < 1000; ++i)
     {
@@ -185,20 +173,6 @@ int main()
         << ecs.count<mycomponent>() << " entities with mycomponent, "
         << ecs.count<tagcomponent>() << " entities with tagcomponent."
         << std::endl;
-
-    // You can get the nth entity that has a given component with 
-    // ecs::get_entity(). This is rarely useful, but useful for picking a
-    // random entity out of a selection.
-    monkero::entity tagged_entity = ecs.get_entity<tagcomponent>(0);
-    std::cout
-        << "Entity id " << tagged_entity
-        << " is the oldest with tagcomponent!" << std::endl;
-
-    // You can use ecs::has() to check if an entity has a component. This is
-    // equivalent to using ecs::get() and checking if the returned value isn't
-    // nullptr.
-    if(ecs.has<mycomponent>(tagged_entity))
-        std::cout << "It also has mycomponent!" << std::endl;
 
     // I don't want the first entity to have a tag anymore. Let's remove it!
     ecs.remove<tagcomponent>(first);

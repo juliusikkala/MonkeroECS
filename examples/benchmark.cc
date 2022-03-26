@@ -1,4 +1,5 @@
-#include "monkeroecs.hh"
+//#include "ecs.hh"
+#include "../monkeroecs.hh"
 #include <iostream>
 #include <cstdlib>
 

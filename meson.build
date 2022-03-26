@@ -21,14 +21,7 @@ if doxygen.found()
   run_target('docs', command : [doxygen, doxyfile])
 endif
 
-incdir = include_directories('.')
-
-executable(
-  'boardgame',
-  files('examples/boardgame.cc'),
-  include_directories: [incdir],
-  install: true,
-)
+incdir = include_directories('multi')
 
 executable(
   'everything',

@@ -1,15 +1,11 @@
-#include "monkeroecs.hh"
+#include "ecs.hh"
+//#include "../monkeroecs.hh"
 #include <iostream>
 #include <cstdlib>
 #include <chrono>
 #include <random>
 
 struct small
-{
-    int data;
-};
-
-struct ptr: monkero::ptr_component
 {
     int data;
 };
@@ -37,7 +33,6 @@ void test_random_access()
         if(dist(rng)==0) ecs.attach(id, tag{});
         if(dist(rng)==0) ecs.attach(id, small{});
         if(dist(rng)==0) ecs.attach(id, large{});
-        if(dist(rng)==0) ecs.attach(id, ptr{});
         ids.push_back(id);
     }
 
@@ -83,17 +78,6 @@ void test_random_access()
     finish = std::chrono::high_resolution_clock::now();
     diff = std::chrono::duration_cast<std::chrono::duration<float>>(finish-start).count();
     printf("large random access %f (count: %d)\n", diff, total);
-
-    start = std::chrono::high_resolution_clock::now();
-    total = 0;
-    for(size_t i = 0; i < M*N; ++i)
-    {
-        ptr* t = ecs.get<ptr>(shuffled_ids[i]);
-        total += t != nullptr ? 1 : 0;
-    }
-    finish = std::chrono::high_resolution_clock::now();
-    diff = std::chrono::duration_cast<std::chrono::duration<float>>(finish-start).count();
-    printf("ptr random access %f (count: %d)\n", diff, total);
 }
 
 void test_iteration()
@@ -101,7 +85,7 @@ void test_iteration()
     monkero::ecs ecs;
     std::default_random_engine rng(0);
     std::uniform_int_distribution<int> dist1(0, 1);
-    std::uniform_int_distribution<int> dist2(0, 1);
+    std::uniform_int_distribution<int> dist2(0, 1000);
 
     // Populate ECS.
     size_t N = 1<<22;
@@ -112,7 +96,6 @@ void test_iteration()
         if(dist2(rng)==0) ecs.attach(id, tag{});
         if(dist1(rng)==0) ecs.attach(id, small{2});
         if(dist1(rng)==0) ecs.attach(id, large{2, {}});
-        if(dist1(rng)==0) ecs.attach(id, ptr{{}, 2});
         ids.push_back(id);
     }
 
@@ -156,25 +139,12 @@ void test_iteration()
 
     start = std::chrono::high_resolution_clock::now();
     total = 1;
-    for(size_t i = 0; i < M; ++i)
-    {
-        ecs([&](ptr& t){
-            total *= t.data;
-        });
-    }
-    finish = std::chrono::high_resolution_clock::now();
-    diff = std::chrono::duration_cast<std::chrono::duration<float>>(finish-start).count();
-    printf("ptr iteration %f (count: %lu, rubbish: %lu)\n", diff, M * ecs.count<ptr>(), total);
-
-    start = std::chrono::high_resolution_clock::now();
-    total = 1;
     size_t sum = 0;
     for(size_t i = 0; i < M; ++i)
     {
-        ecs([&](tag& t1, small& t2, large& t3, ptr& t4){
+        ecs([&](tag& t1, small& t2, large& t3){
             total *= t2.data;
             total *= t3.data;
-            total *= t4.data;
             sum++;
         });
     }

@@ -1,3 +1,4 @@
+/*
 The MIT License (MIT)
 
 Copyright (c) 2020, 2021, 2022 Julius Ikkala
@@ -19,3 +20,23 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+*/
+#ifndef MONKERO_ENTITY_HH
+#define MONKERO_ENTITY_HH
+#include <cstdint>
+
+namespace monkero
+{
+
+/** The entity type, it's just an ID.
+ * An entity alone will not take up memory in the ECS, only once components are
+ * added does the entity truly use memory. You can change this to uint64_t if
+ * you truly need over 4 billion entities and have tons of memory.
+ */
+using entity = std::uint32_t;
+// You are not allowed to use this entity ID.
+inline constexpr entity INVALID_ENTITY = 0;
+
+}
+
+#endif

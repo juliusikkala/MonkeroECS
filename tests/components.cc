@@ -4,10 +4,9 @@
 
 struct test_component_tag { test_component_tag(int = 123){} };
 struct test_component_normal { test_component_normal(int a = 123): a(a) {} int a; };
-struct test_component_ptr: ptr_component { test_component_ptr(int a = 123): a(a) {} int a; };
 struct test_component_dependency_tag:
     dependency_components<
-        test_component_tag, test_component_normal, test_component_ptr
+        test_component_tag, test_component_normal
     >
 {
     test_component_dependency_tag(int) {}
@@ -15,20 +14,10 @@ struct test_component_dependency_tag:
 
 struct test_component_dependency_normal:
     dependency_components<
-        test_component_tag, test_component_normal, test_component_ptr
+        test_component_tag, test_component_normal
     >
 {
     test_component_dependency_normal(int a = 123): a(a) {}
-    int a;
-};
-
-struct test_component_dependency_ptr:
-    ptr_component,
-    dependency_components<
-        test_component_tag, test_component_normal, test_component_ptr
-    >
-{
-    test_component_dependency_ptr(int a): a(a) {}
     int a;
 };
 
@@ -68,10 +57,6 @@ void run_tests(ecs& e)
         test(e.count<Component>() == N);
         test_sum<Component>(e, real_sum);
 
-        // Reserve should not change size.
-        e.reserve<Component>(2*N);
-        test(e.count<Component>() == N);
-
         if(batching) e.start_batch();
         // Check attach
         for(int i = 0; i < N; ++i)
@@ -103,22 +88,15 @@ void run_tests(ecs& e)
         // Make sure dependencies were actually added
         if constexpr(
             std::is_same_v<Component, test_component_dependency_tag> ||
-            std::is_same_v<Component, test_component_dependency_normal> ||
-            std::is_same_v<Component, test_component_dependency_ptr>
+            std::is_same_v<Component, test_component_dependency_normal>
         ){
             test(e.count<test_component_tag>() == 2*N);
             test(e.count<test_component_normal>() == 2*N);
-            test(e.count<test_component_ptr>() == 2*N);
         }
 
-        // Check that pointers are still valid if that's relevant
-        if constexpr(
-            std::is_same_v<Component, test_component_ptr> ||
-            std::is_same_v<Component, test_component_dependency_ptr>
-        ){
-            size_t i = 0;
-            e.foreach([&](Component& c){test(&c == ptrs[i]); ++i;});
-        }
+        // Check that pointers are still valid.
+        size_t i = 0;
+        e.foreach([&](Component& c){test(&c == ptrs[i]); ++i;});
 
         if(batching) e.start_batch();
 
@@ -144,12 +122,10 @@ void run_tests(ecs& e)
         // Component-wise removal should not remove dependencies.
         if constexpr(
             std::is_same_v<Component, test_component_dependency_tag> ||
-            std::is_same_v<Component, test_component_dependency_normal> ||
-            std::is_same_v<Component, test_component_dependency_ptr>
+            std::is_same_v<Component, test_component_dependency_normal>
         ){
             test(e.count<test_component_tag>() == 2*N);
             test(e.count<test_component_normal>() == 2*N);
-            test(e.count<test_component_ptr>() == 2*N);
         }
 
         if(batching) e.start_batch();
@@ -177,12 +153,10 @@ void run_tests(ecs& e)
         // Full removal should remove dependencies too.
         if constexpr(
             std::is_same_v<Component, test_component_dependency_tag> ||
-            std::is_same_v<Component, test_component_dependency_normal> ||
-            std::is_same_v<Component, test_component_dependency_ptr>
+            std::is_same_v<Component, test_component_dependency_normal>
         ){
             test(e.count<test_component_tag>() == 2*N-N/2);
             test(e.count<test_component_normal>() == 2*N-N/2);
-            test(e.count<test_component_ptr>() == 2*N-N/2);
         }
 
         // Finally, clear should remove everything.
@@ -190,12 +164,10 @@ void run_tests(ecs& e)
         test(e.count<Component>() == 0);
         if constexpr(
             std::is_same_v<Component, test_component_dependency_tag> ||
-            std::is_same_v<Component, test_component_dependency_normal> ||
-            std::is_same_v<Component, test_component_dependency_ptr>
+            std::is_same_v<Component, test_component_dependency_normal>
         ){
             test(e.count<test_component_tag>() == 0);
             test(e.count<test_component_normal>() == 0);
-            test(e.count<test_component_ptr>() == 0);
         }
     }
 }
@@ -206,10 +178,8 @@ int main()
 
     run_tests<test_component_tag>(e);
     run_tests<test_component_normal>(e);
-    run_tests<test_component_ptr>(e);
     run_tests<test_component_dependency_tag>(e);
     run_tests<test_component_dependency_normal>(e);
-    run_tests<test_component_dependency_ptr>(e);
 
     return 0;
 }

@@ -1,3 +1,4 @@
+/*
 The MIT License (MIT)
 
 Copyright (c) 2020, 2021, 2022 Julius Ikkala
@@ -19,3 +20,38 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+*/
+#ifndef MONKERO_SEARCH_INDEX_TCC
+#define MONKERO_SEARCH_INDEX_TCC
+#include "search_index.hh"
+
+namespace monkero
+{
+
+template<typename T>
+constexpr bool search_index_is_empty_default(
+    int,
+    typename T::empty_default_impl const * = nullptr
+){ return true; }
+
+template<typename T>
+constexpr bool search_index_is_empty_default(long)
+{ return false; }
+
+template<typename T>
+constexpr bool search_index_is_empty_default()
+ { return search_index_is_empty_default<T>(0); }
+
+template<typename Component>
+void search_index<Component>::add_entity(entity, const Component&) {}
+
+template<typename Component>
+void search_index<Component>::update(ecs&) {}
+
+template<typename Component>
+void search_index<Component>::remove_entity(entity, const Component&) {}
+
+}
+
+#endif
+

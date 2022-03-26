@@ -1,7 +1,7 @@
 /*
 The MIT License (MIT)
 
-Copyright (c) 2020, 2021 Julius Ikkala
+Copyright (c) 2020, 2021, 2022 Julius Ikkala
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -34,30 +34,39 @@ SOFTWARE.
  * trickery to make the usable as terse as it is.
  *
  * While performance is one of the goals of this ECS, it was more written with
- * flexibility in mind. It can iterate over large numbers of entities quickly
- * (this case was optimized for), but one-off lookups of individual components
- * is logarithmic. On the flipside, there is no maximum limit to the number of
- * entities other than the entity ID being 32-bit (just change it to 64-bit if
- * you are a madman and need more, it should work but consumes more memory).
+ * flexibility in mind. Particularly, random access and multi-component
+ * iteration should be quite fast. All components have stable storage, that is,
+ * they will not get moved around after their creation. Therefore, the ECS also
+ * works with components that are not copyable or movable and pointers to them
+ * will not be invalidated until the component is removed.
  *
  * Adding the ECS to your project is simple; just copy the monkeroecs.hh yo
  * your codebase and include it!
  *
  * The name is a reference to the game the ECS was originally created for, but
- * it was unfortunately never finished or released despite the engine being in a
- * finished state.
+ * it was unfortunately never finished or released in any form despite the
+ * engine being in a finished state.
  */
 #ifndef MONKERO_ECS_HH
 #define MONKERO_ECS_HH
-#include <functional>
-#include <unordered_map>
+//#define MONKERO_CONTAINER_DEALLOCATE_BUCKETS
+//#define MONKERO_CONTAINER_DEBUG_UTILS
+#include <cstdint>
 #include <map>
-#include <algorithm>
-#include <vector>
+#include <functional>
 #include <memory>
-#include <tuple>
+#include <vector>
 #include <limits>
-#include <any>
+#include <utility>
+#include <type_traits>
+#include <algorithm>
+#include <tuple>
+#include <map>
+#include <cstring>
+#ifdef MONKERO_CONTAINER_DEBUG_UTILS
+#include <iostream>
+#include <bitset>
+#endif
 
 /** This namespace contains all of MonkeroECS. */
 namespace monkero
@@ -68,20 +77,10 @@ namespace monkero
  * added does the entity truly use memory. You can change this to uint64_t if
  * you truly need over 4 billion entities and have tons of memory.
  */
-using entity = uint32_t;
-inline constexpr entity INVALID_ENTITY = std::numeric_limits<entity>::max();
+using entity = std::uint32_t;
+// You are not allowed to use this entity ID.
+inline constexpr entity INVALID_ENTITY = 0;
 
-inline constexpr uint32_t CACHE_LINE_SIZE = 64;
-inline constexpr uintptr_t CACHE_LINE_MASK = ~(uintptr_t)(CACHE_LINE_SIZE-1);
-
-/** A base class for components which need to have unchanging memory addresses.
- * Derive from this if you want to have an extra layer of indirection in the
- * storage of this component. What this allows is no move or copy constructor
- * calls and faster add & remove at the cost of iteration speed. Additionally,
- * the pointer to the component will not become outdated until that specific
- * component is removed.
- */
-struct ptr_component {};
 class ecs;
 
 /** A built-in event emitted when a component is added to the ECS. */
@@ -100,7 +99,7 @@ template<typename Component>
 struct remove_component
 {
     entity id; /**< The entity that lost the component */
-    Component* data; /**< A pointer to the component (it's not destroyed yet) */
+    Component* data; /**< A pointer to the component (it's not destroyed quite yet) */
 };
 
 /** This class is used to receive events of the specified type(s).
@@ -113,7 +112,7 @@ class event_subscription
 {
 friend class ecs;
 public:
-    inline event_subscription(ecs* ctx = nullptr, size_t subscription_id = 0);
+    inline event_subscription(ecs* ctx = nullptr, std::size_t subscription_id = 0);
     inline explicit event_subscription(event_subscription&& other);
     event_subscription(const event_subscription& other) = delete;
     inline ~event_subscription();
@@ -123,7 +122,7 @@ public:
 
 private:
     ecs* ctx;
-    size_t subscription_id;
+    std::size_t subscription_id;
 };
 
 // Provides event receiving facilities for one type alone. Derive
@@ -196,6 +195,241 @@ public:
     using empty_default_impl = void;
 };
 
+template<typename T, typename=void>
+struct has_bucket_exp_hint: std::false_type { };
+
+template<typename T>
+struct has_bucket_exp_hint<
+    T,
+    decltype((void)
+        T::bucket_exp_hint, void()
+    )
+> : std::is_integral<decltype(T::bucket_exp_hint)> { };
+
+/** Provides bucket size choice for the component container.
+ * To change the number of entries in a bucket for your component type, you have
+ * two options:
+ * A (preferred when you can modify the component type):
+ *     Add a `static constexpr std::uint32_t bucket_exp_hint = N;`
+ * B (needed when you cannot modify the component type):
+ *     Specialize component_bucket_exp_hint for your type and provide a
+ *     `static constexpr std::uint32_t value = N;`
+ * Where the bucket size will then be 2**N.
+ */
+template<typename T>
+struct component_bucket_exp_hint
+{
+    static constexpr std::uint32_t value = []{
+        if constexpr (has_bucket_exp_hint<T>::value)
+        {
+            return T::bucket_exp_hint;
+        }
+        else
+        {
+            uint32_t i = 6;
+            // Aim for 65kb buckets
+            while((std::max(sizeof(T), 4lu)<<i) < 65536lu)
+                ++i;
+            return i;
+        }
+    }();
+};
+
+class component_container_base
+{
+public:
+    virtual ~component_container_base() = default;
+
+    inline virtual void start_batch() = 0;
+    inline virtual void finish_batch() = 0;
+    inline virtual void erase(entity id) = 0;
+    inline virtual void clear() = 0;
+    inline virtual std::size_t size() const = 0;
+    inline virtual void update_search_index() = 0;
+    inline virtual void list_entities(
+        std::map<entity, entity>& translation_table
+    ) = 0;
+    inline virtual void concat(
+        ecs& target,
+        const std::map<entity, entity>& translation_table
+    ) = 0;
+    inline virtual void copy(
+        ecs& target,
+        entity result_id,
+        entity original_id
+    ) = 0;
+};
+
+struct component_container_entity_advancer
+{
+public:
+    inline void advance();
+
+    std::uint32_t bucket_mask;
+    std::uint32_t bucket_exp;
+    entity*** bucket_jump_table;
+    std::uint32_t current_bucket;
+    entity current_entity;
+    entity* current_jump_table;
+};
+
+template<typename T>
+class component_container: public component_container_base
+{
+public:
+    using bitmask_type = std::uint64_t;
+    static constexpr uint32_t bitmask_bits = 64;
+    static constexpr uint32_t bitmask_shift = 6; // 64 = 2**6
+    static constexpr uint32_t bitmask_mask = 0x3F;
+    static constexpr uint32_t initial_bucket_count = 16u;
+    static constexpr bool tag_component = std::is_empty_v<T>;
+    static constexpr std::uint32_t bucket_exp =
+        component_bucket_exp_hint<T>::value;
+    static constexpr std::uint32_t bucket_mask = (1u<<bucket_exp)-1;
+    static constexpr std::uint32_t bucket_bitmask_units =
+        std::max(1u, (1u<<bucket_exp)>>bitmask_shift);
+
+    component_container(ecs& ctx);
+    component_container(component_container&& other) = delete;
+    component_container(const component_container& other) = delete;
+    ~component_container();
+
+    T* operator[](entity e);
+    const T* operator[](entity e) const;
+
+    void insert(entity id, T&& value);
+
+    template<typename... Args>
+    void emplace(entity id, Args&&... value);
+
+    void erase(entity id) override;
+
+    void clear() override;
+
+    bool contains(entity id) const;
+
+    void start_batch() override;
+    void finish_batch() override;
+
+    class iterator
+    {
+    friend class component_container<T>;
+    public:
+        using component_type = T;
+
+        iterator() = delete;
+        iterator(const iterator& other) = default;
+
+        iterator& operator++();
+        iterator operator++(int);
+        std::pair<entity, T*> operator*();
+        std::pair<entity, const T*> operator*() const;
+
+        bool operator==(const iterator& other) const;
+        bool operator!=(const iterator& other) const;
+
+        bool try_advance(entity id);
+
+        operator bool() const;
+        entity get_id() const;
+        component_container<T>* get_container() const;
+        component_container_entity_advancer get_advancer();
+
+    private:
+        iterator(component_container& from, entity e);
+
+        component_container* from;
+        entity current_entity;
+        std::uint32_t current_bucket;
+        entity* current_jump_table;
+        T* current_components;
+    };
+
+    iterator begin();
+    iterator end();
+    std::size_t size() const override;
+
+    void update_search_index() override;
+
+    void list_entities(
+        std::map<entity, entity>& translation_table
+    ) override;
+    void concat(
+        ecs& target,
+        const std::map<entity, entity>& translation_table
+    ) override;
+    void copy(
+        ecs& target,
+        entity result_id,
+        entity original_id
+    ) override;
+
+    template<typename... Args>
+    entity find_entity(Args&&... args) const;
+
+#ifdef MONKERO_CONTAINER_DEBUG_UTILS
+    bool test_invariant() const;
+    void print_bitmask() const;
+    void print_jump_table() const;
+#endif
+
+private:
+    T* get_unsafe(entity e);
+    void destroy();
+    void jump_table_insert(entity id);
+    void jump_table_erase(entity id);
+    std::size_t get_top_bitmask_size() const;
+    bool bitmask_empty(std::uint32_t bucket_index) const;
+    void bitmask_insert(entity id);
+    // Returns a hint to whether the whole bucket should be removed or not.
+    bool bitmask_erase(entity id);
+
+    template<typename... Args>
+    void bucket_insert(entity id, Args&&... args);
+    void bucket_erase(entity id, bool signal);
+    void bucket_self_erase(std::uint32_t bucket_index);
+    void try_jump_table_bucket_erase(std::uint32_t bucket_index);
+    void ensure_bucket_space(entity id);
+    void ensure_bitmask(std::uint32_t bucket_index);
+    void ensure_jump_table(std::uint32_t bucket_index);
+    bool batch_change(entity id);
+    entity find_previous_entity(entity id);
+    void signal_add(entity id, T* data);
+    void signal_remove(entity id, T* data);
+    static unsigned bitscan_reverse(std::uint64_t mt);
+    static bool find_bitmask_top(
+        bitmask_type* bitmask,
+        std::uint32_t count,
+        std::uint32_t& top_index
+    );
+    static bool find_bitmask_previous_index(
+        bitmask_type* bitmask,
+        std::uint32_t index,
+        std::uint32_t& prev_index
+    );
+
+    struct alignas(T) t_mimicker { std::uint8_t pad[sizeof(T)]; };
+
+    // Bucket data
+    std::uint32_t entity_count;
+    std::uint32_t bucket_count;
+    bitmask_type** bucket_bitmask;
+    bitmask_type* top_bitmask;
+    entity** bucket_jump_table;
+    T** bucket_components;
+
+    // Batching data
+    bool batching;
+    std::uint32_t batch_checklist_size;
+    std::uint32_t batch_checklist_capacity;
+    entity* batch_checklist;
+    bitmask_type** bucket_batch_bitmask;
+
+    // Search index (kinda separate, but handy to keep around here.)
+    ecs* ctx;
+    search_index<T> search;
+};
+
 /** The primary class of the ECS.
  * Entities are created by it, components are attached throught it and events
  * are routed through it.
@@ -233,18 +467,7 @@ public:
     template<typename F>
     inline void operator()(F&& f);
 
-    /** Reserves space for components.
-     * Using this function isn't mandatory, but it can be used to improve
-     * performance when about to add a known number of components.
-     * \tparam Component The type of component to reserve memory for.
-     * \param count The number of components to reserve memory for.
-     */
-    template<typename Component>
-    void reserve(size_t count);
-
     /** Adds an entity without components.
-     * No memory is reserved, as the operation literally just increments a
-     * counter.
      * \return The new entity ID.
      */
     inline entity add();
@@ -257,6 +480,13 @@ public:
      */
     template<typename... Components>
     entity add(Components&&... components);
+
+    /** Adds a component to an existing entity, building it in-place.
+     * \param id The entity that components are added to.
+     * \param args Parameters for the constructor of the Component type.
+     */
+    template<typename Component, typename... Args>
+    void emplace(entity id, Args&&... args);
 
     /** Adds components to an existing entity.
      * Takes a list of component instances. Note that they must be moved in, so
@@ -309,26 +539,18 @@ public:
     inline entity copy(ecs& other, entity other_id);
 
     /** Starts batching behaviour for add/remove.
-     * If you know you are going to do a lot of modifications to existing
-     * entities (i.e. attaching new components to old entities or removing
-     * components in any case), you can call start_batch() before that and
-     * finish_batch() after to gain a lot of performance. If there's only a
-     * couple of modifications, don't bother. Also, if you are within a foreach
-     * loop, batching will already be applied.
+     * Batching allows you to safely add and remove components while you iterate
+     * over them, but comes with no performance benefit.
      */
     inline void start_batch();
 
     /** Finishes batching behaviour for add/remove and applies the changes.
-     * Some batched changes take place immediately, but many are not. After
-     * calling finish_batch(), all functions act like you would expect.
      */
     inline void finish_batch();
 
     /** Counts instances of entities with a specified component.
      * \tparam Component the component type to count instances of.
      * \return The number of entities with the specified component.
-     * \note This count is only valid when not batching. It is stuck to the
-     * value before batching started.
      */
     template<typename Component>
     size_t count() const;
@@ -357,21 +579,6 @@ public:
      */
     template<typename Component>
     Component* get(entity id);
-
-    /** Returns the Nth entity of those that have a given component.
-     * This is primarily useful for picking an arbitrary entity out of many,
-     * like picking a random entity etc.
-     * \tparam Component The component type whose entity list is used.
-     * \param index The index of the entity id to return.
-     * \return The Nth entity id with \p Component.
-     * \warning There is no bounds checking. Use count() to be safe.
-     * \note This function is only valid when not batching, but it is safe to
-     * use with count() during batching as well. You may encounter entities that
-     * are pending for removal and will not find entities whose addition is
-     * pending.
-     */
-    template<typename Component>
-    entity get_entity(size_t index) const;
 
     /** Uses search_index<Component> to find the desired component.
      * \tparam Component the component type to search for.
@@ -474,195 +681,40 @@ public:
     event_subscription subscribe(F&&... callbacks);
 
 private:
-    class component_container_base
-    {
-    public:
-        virtual ~component_container_base() = default;
-
-        inline virtual void resolve_pending() = 0;
-        inline virtual void remove(ecs& ctx, entity id) = 0;
-        inline virtual void clear(ecs& ctx) = 0;
-        inline virtual size_t count() const = 0;
-        inline virtual void update_search_index(ecs& ctx) = 0;
-        inline virtual void list_entities(
-            std::map<entity, entity>& translation_table
-        ) = 0;
-        inline virtual void concat(
-            ecs& ctx,
-            const std::map<entity, entity>& translation_table
-        ) = 0;
-        inline virtual void copy(
-            ecs& target,
-            entity result_id,
-            entity original_id
-        ) = 0;
-    };
-
-    template<typename Component>
-    struct foreach_iterator_base;
-
-    template<typename Component>
-    struct foreach_iterator;
-
-    template<typename Component>
-    class component_container: public component_container_base
-    {
-        template<typename> friend struct foreach_iterator_base;
-        template<typename> friend struct foreach_iterator;
-    public:
-        struct component_tag
-        {
-            component_tag();
-            component_tag(Component&& c);
-
-            Component* get();
-        };
-
-        struct component_payload
-        {
-            component_payload();
-            component_payload(Component&& c);
-            Component c;
-
-            Component* get();
-        };
-
-        struct component_indirect
-        {
-            component_indirect();
-            component_indirect(Component* c);
-            std::unique_ptr<Component> c;
-
-            Component* get();
-        };
-
-        static constexpr bool use_indirect =
-            std::is_base_of_v<ptr_component, Component> ||
-            std::is_polymorphic_v<Component>;
-
-        static constexpr bool use_empty =
-            std::is_empty_v<Component> && !use_indirect;
-
-        struct dummy_container
-        {
-            void resize(size_t size);
-            void reserve(size_t size);
-            void clear();
-            component_tag* begin();
-            void erase(component_tag*);
-            dummy_container data();
-            component_tag& emplace_back(component_tag&&);
-            component_tag* emplace(component_tag*, component_tag&&);
-            component_tag& operator[](size_t i) const;
-        };
-
-        using component_data = std::conditional_t<
-            use_indirect, component_indirect,
-            std::conditional_t<
-                use_empty,
-                component_tag,
-                component_payload
-            >
-        >;
-
-        using component_storage = std::conditional_t<
-            use_empty, dummy_container, std::vector<component_data>
-        >;
-
-        using component_array = std::conditional_t<
-            use_empty, dummy_container, component_data*
-        >;
-
-        Component* get(entity id);
-        entity get_entity(size_t index) const;
-        template<typename... Args>
-        entity find_entity(Args&&... args) const;
-
-        void native_add(
-            ecs& ctx,
-            entity id,
-            std::conditional_t<use_indirect, Component*, Component&&> c
-        );
-        void add(ecs& ctx, entity id, Component* c);
-        void add(ecs& ctx, entity id, Component&& c);
-        void add(ecs& ctx, entity id, const Component& c);
-        void remove(ecs& ctx, entity id) override;
-        void reserve(size_t count);
-        void resolve_pending() override;
-        void clear(ecs& ctx) override;
-        size_t count() const override;
-        void update_search_index(ecs& ctx) override;
-
-        void list_entities(
-            std::map<entity, entity>& translation_table
-        ) override;
-        void concat(
-            ecs& ctx,
-            const std::map<entity, entity>& translation_table
-        ) override;
-        void copy(
-            ecs& target,
-            entity result_id,
-            entity original_id
-        ) override;
-
-    private:
-        void signal_add(ecs& ctx, entity id, Component* data);
-        void signal_remove(ecs& ctx, entity id, Component* data);
-
-        search_index<Component> search;
-        std::vector<entity> ids;
-        component_storage components;
-        std::vector<entity> pending_removal_ids;
-        std::vector<entity> pending_addition_ids;
-        component_storage pending_addition_components;
-    };
-
-    template<typename Component>
-    struct foreach_iterator_base
-    {
-        using Type = std::decay_t<Component>;
-        using Container = component_container<Type>;
-
-        foreach_iterator_base(Container& c);
-
-        inline bool finished();
-        inline entity advance_up_to(entity id);
-        inline entity advance_one();
-        inline entity get_id() const;
-
-        typename Container::component_array components;
-        entity* ids;
-        entity* begin;
-        entity* end;
-        bool dense;
-    };
-
-    template<typename Component>
-    struct foreach_iterator<Component&>: foreach_iterator_base<Component>
-    {
-        static constexpr bool required = true;
-        using foreach_iterator_base<Component>::foreach_iterator_base;
-        using Type = typename foreach_iterator_base<Component>::Type;
-
-        Type& get(entity id);
-    };
-
-    template<typename Component>
-    struct foreach_iterator<Component*>: foreach_iterator_base<Component>
-    {
-        static constexpr bool required = false;
-        using foreach_iterator_base<Component>::foreach_iterator_base;
-        using Type = typename foreach_iterator_base<Component>::Type;
-
-        Type* get(entity id);
-    };
-
     template<bool pass_id, typename... Components>
     struct foreach_impl
     {
         template<typename F>
-        static inline void call(ecs& ctx, F&& f);
+        static void foreach(ecs& ctx, F&& f);
+
+        template<typename Component>
+        struct iterator_wrapper
+        {
+            static constexpr bool required = true;
+            typename component_container<std::decay_t<std::remove_pointer_t<std::decay_t<Component>>>>::iterator iter;
+        };
+
+        template<typename Component>
+        static inline auto make_iterator(ecs& ctx)
+        {
+            return iterator_wrapper<Component>{
+                ctx.get_container<std::decay_t<std::remove_pointer_t<std::decay_t<Component>>>>().begin()
+            };
+        }
+
+        template<typename Component>
+        struct converter
+        {
+            template<typename T>
+            static inline T& convert(T*);
+        };
+
+        template<typename F>
+        static void call(
+            F&& f,
+            entity id,
+            std::decay_t<std::remove_pointer_t<std::decay_t<Components>>>*... args
+        );
     };
 
     template<typename... Components>
@@ -688,8 +740,6 @@ private:
     template<typename Component>
     component_container<Component>& get_container() const;
 
-    inline void resolve_pending();
-
     template<typename Component>
     static size_t get_component_type_key();
     inline static size_t component_type_key_counter = 0;
@@ -706,6 +756,7 @@ private:
 
     entity id_counter;
     std::vector<entity> reusable_ids;
+    std::vector<entity> post_batch_reusable_ids;
     size_t subscriber_counter;
     int defer_batch;
     mutable std::vector<std::unique_ptr<component_container_base>> components;
@@ -734,21 +785,1230 @@ public:
     static void ensure_dependency_components_exist(entity id, ecs& ctx);
 };
 
+
 //==============================================================================
 // Implementation
 //==============================================================================
 
-inline size_t lower_bound(std::vector<entity>& ids, entity id)
+event_subscription::event_subscription(ecs* ctx, std::size_t subscription_id)
+: ctx(ctx), subscription_id(subscription_id)
 {
-    // TODO: More optimal implementation than binary search is possible! Our
-    // list has the further limitation of no duplications. Also, should use SSE.
-    return std::lower_bound(ids.begin(), ids.end(), id)-ids.begin();
 }
 
-ecs::ecs()
-: id_counter(0), defer_batch(0)
+event_subscription::event_subscription(event_subscription&& other)
+: ctx(other.ctx), subscription_id(other.subscription_id)
 {
-    components.reserve(64);
+    other.ctx = nullptr;
+}
+
+event_subscription::~event_subscription()
+{
+    if(ctx)
+        ctx->remove_event_handler(subscription_id);
+}
+
+template<typename T>
+constexpr bool search_index_is_empty_default(
+    int,
+    typename T::empty_default_impl const * = nullptr
+){ return true; }
+
+template<typename T>
+constexpr bool search_index_is_empty_default(long)
+{ return false; }
+
+template<typename T>
+constexpr bool search_index_is_empty_default()
+ { return search_index_is_empty_default<T>(0); }
+
+template<typename Component>
+void search_index<Component>::add_entity(entity, const Component&) {}
+
+template<typename Component>
+void search_index<Component>::update(ecs&) {}
+
+template<typename Component>
+void search_index<Component>::remove_entity(entity, const Component&) {}
+
+template<typename T>
+component_container<T>::component_container(ecs& ctx)
+:   entity_count(0), bucket_count(0),
+    bucket_bitmask(nullptr), top_bitmask(nullptr),
+    bucket_jump_table(nullptr), bucket_components(nullptr), batching(false),
+    batch_checklist_size(0), batch_checklist_capacity(0),
+    batch_checklist(nullptr), bucket_batch_bitmask(nullptr), ctx(&ctx)
+{
+}
+
+template<typename T>
+component_container<T>::~component_container()
+{
+    destroy();
+}
+
+template<typename T>
+T* component_container<T>::operator[](entity e)
+{
+    if(!contains(e)) return nullptr;
+    return get_unsafe(e);
+}
+
+template<typename T>
+const T* component_container<T>::operator[](entity e) const
+{
+    return const_cast<component_container<T>*>(this)->operator[](e);
+}
+
+template<typename T>
+void component_container<T>::insert(entity id, T&& value)
+{
+    emplace(id, std::move(value));
+}
+
+template<typename T>
+template<typename... Args>
+void component_container<T>::emplace(entity id, Args&&... args)
+{
+    if(id == INVALID_ENTITY)
+        return;
+
+    ensure_bucket_space(id);
+    if(contains(id))
+    { // If we just replace something that exists, life is easy.
+        bucket_erase(id, true);
+        bucket_insert(id, std::forward<Args>(args)...);
+    }
+    else if(batching)
+    {
+        entity_count++;
+        if(!batch_change(id))
+        {
+            // If there was already a change, that means that there was an
+            // existing batched erase. That means that we can replace an
+            // existing object instead.
+            bucket_erase(id, false);
+        }
+        bucket_insert(id, std::forward<Args>(args)...);
+    }
+    else
+    {
+        entity_count++;
+        bitmask_insert(id);
+        jump_table_insert(id);
+        bucket_insert(id, std::forward<Args>(args)...);
+    }
+}
+
+template<typename T>
+void component_container<T>::erase(entity id)
+{
+    if(!contains(id))
+        return;
+    entity_count--;
+
+    if(batching)
+    {
+        if(!batch_change(id))
+        {
+            // If there was already a change, that means that there was an
+            // existing batched add. Because it's not being iterated, we can
+            // just destroy it here.
+            bucket_erase(id, true);
+        }
+        else signal_remove(id, get_unsafe(id));
+    }
+    else
+    {
+        bool erase_bucket = bitmask_erase(id);
+        jump_table_erase(id);
+        bucket_erase(id, true);
+        if(erase_bucket)
+        {
+            bucket_self_erase(id >> bucket_exp);
+            try_jump_table_bucket_erase(id >> bucket_exp);
+        }
+    }
+}
+
+template<typename T>
+void component_container<T>::clear()
+{
+    if(batching)
+    { // Uh oh, this is super suboptimal :/ pls don't clear while iterating.
+        for(auto it = begin(); it != end(); ++it)
+        {
+            erase((*it).first);
+        }
+    }
+    else
+    {
+        // Clear top bitmask
+        std::uint32_t top_bitmask_count = get_top_bitmask_size();
+        for(std::uint32_t i = 0; i< top_bitmask_count; ++i)
+            top_bitmask[i] = 0;
+
+        // Destroy all existing objects
+        if(
+            ctx->get_handler_count<remove_component<T>>() ||
+            !search_index_is_empty_default<decltype(search)>()
+        ){
+            for(auto it = begin(); it != end(); ++it)
+            {
+                auto pair = *it;
+                signal_remove(pair.first, pair.second);
+                pair.second->~T();
+            }
+        }
+        else
+        {
+            for(auto it = begin(); it != end(); ++it)
+                (*it).second->~T();
+        }
+
+        // Release all bucket pointers
+        for(std::uint32_t i = 0; i < bucket_count; ++i)
+        {
+            if(bucket_bitmask[i])
+            {
+                delete [] bucket_bitmask[i];
+                bucket_bitmask[i] = nullptr;
+            }
+            if(bucket_batch_bitmask[i])
+            {
+                delete [] bucket_batch_bitmask[i];
+                bucket_batch_bitmask[i] = nullptr;
+            }
+            if(bucket_jump_table[i])
+            {
+                delete [] bucket_jump_table[i];
+                bucket_jump_table[i] = nullptr;
+            }
+            if constexpr(!tag_component)
+            {
+                if(bucket_components[i])
+                {
+                    delete [] reinterpret_cast<t_mimicker*>(bucket_components[i]);
+                    bucket_components[i] = nullptr;
+                }
+            }
+        }
+    }
+    entity_count = 0;
+}
+
+template<typename T>
+bool component_container<T>::contains(entity id) const
+{
+    entity hi = id >> bucket_exp;
+    if(id == INVALID_ENTITY || hi >= bucket_count) return false;
+    entity lo = id & bucket_mask;
+    if(batching)
+    {
+        bitmask_type bitmask = bucket_bitmask[hi] ?
+            bucket_bitmask[hi][lo>>bitmask_shift] : 0;
+        if(bucket_batch_bitmask[hi])
+            bitmask ^= bucket_batch_bitmask[hi][lo>>bitmask_shift];
+        return (bitmask >> (lo&bitmask_mask))&1;
+    }
+    else
+    {
+        bitmask_type* bitmask = bucket_bitmask[hi];
+        if(!bitmask) return false;
+        return (bitmask[lo>>bitmask_shift] >> (lo&bitmask_mask))&1;
+    }
+}
+
+template<typename T>
+void component_container<T>::start_batch()
+{
+    batching = true;
+    batch_checklist_size = 0;
+}
+
+template<typename T>
+void component_container<T>::finish_batch()
+{
+    if(!batching) return;
+    batching = false;
+
+    // Discard duplicate changes first.
+    for(std::uint32_t i = 0; i < batch_checklist_size; ++i)
+    {
+        std::uint32_t ri = batch_checklist_size-1-i;
+        entity& id = batch_checklist[ri];
+        entity hi = id >> bucket_exp;
+        entity lo = id & bucket_mask;
+        bitmask_type bit = 1lu<<(lo&bitmask_mask);
+        bitmask_type* bbit = bucket_batch_bitmask[hi];
+        if(bbit && (bbit[lo>>bitmask_shift] & bit))
+        { // Not a dupe, but latest state.
+            bbit[lo>>bitmask_shift] ^= bit;
+        }
+        else id = INVALID_ENTITY;
+    }
+
+    // Now, do all changes for realzies. All IDs that are left are unique and
+    // change the existence of an entity.
+    for(std::uint32_t i = 0; i < batch_checklist_size; ++i)
+    {
+        entity& id = batch_checklist[i];
+        if(id == INVALID_ENTITY) continue;
+
+        entity hi = id >> bucket_exp;
+        entity lo = id & bucket_mask;
+        bitmask_type bit = 1lu<<(lo&bitmask_mask);
+        if(bucket_bitmask[hi] && (bucket_bitmask[hi][lo>>bitmask_shift] & bit))
+        { // Erase
+            bitmask_erase(id);
+            jump_table_erase(id);
+            bucket_erase(id, false);
+        }
+        else
+        { // Insert (in-place)
+            bitmask_insert(id);
+            jump_table_insert(id);
+            // No need to add to bucket, that already happened due to batching
+            // semantics.
+        }
+    }
+
+    // Finally, check erased entries for if we can remove their buckets.
+    for(std::uint32_t i = 0; i < batch_checklist_size; ++i)
+    {
+        entity& id = batch_checklist[i];
+        if(id == INVALID_ENTITY) continue;
+
+        entity hi = id >> bucket_exp;
+        if(bucket_bitmask[hi] == nullptr) // Already erased!
+            continue;
+
+        entity lo = id & bucket_mask;
+        if(bucket_bitmask[hi][lo>>bitmask_shift] == 0 && bitmask_empty(hi))
+        { // This got erased, so check if the whole bucket is empty.
+            bucket_self_erase(hi);
+            try_jump_table_bucket_erase(id >> bucket_exp);
+        }
+    }
+}
+
+template<typename T>
+typename component_container<T>::iterator component_container<T>::begin()
+{
+    if(entity_count == 0) return end();
+    // The jump entry for INVALID_ENTITY stores the first valid entity index.
+    // INVALID_ENTITY is always present, but doesn't cause allocation of a
+    // component for itself.
+    return iterator(*this, bucket_jump_table[0][0]);
+}
+
+template<typename T>
+typename component_container<T>::iterator component_container<T>::end()
+{
+    return iterator(*this, INVALID_ENTITY);
+}
+
+template<typename T>
+std::size_t component_container<T>::size() const
+{
+    return entity_count;
+}
+
+template<typename T>
+void component_container<T>::update_search_index()
+{
+    search.update(*ctx);
+}
+
+template<typename T>
+void component_container<T>::list_entities(
+    std::map<entity, entity>& translation_table
+){
+    for(auto it = begin(); it; ++it)
+        translation_table[(*it).first] = INVALID_ENTITY;
+}
+
+template<typename T>
+void component_container<T>::concat(
+    ecs& target,
+    const std::map<entity, entity>& translation_table
+){
+    if constexpr(std::is_copy_constructible_v<T>)
+    {
+        for(auto it = begin(); it; ++it)
+        {
+            auto pair = *it;
+            target.emplace<T>(translation_table.at(pair.first), *pair.second);
+        }
+    }
+}
+
+template<typename T>
+void component_container<T>::copy(
+    ecs& target,
+    entity result_id,
+    entity original_id
+){
+    if constexpr(std::is_copy_constructible_v<T>)
+    {
+        T* comp = operator[](original_id);
+        if(comp) target.emplace<T>(result_id, *comp);
+    }
+}
+
+template<typename T>
+template<typename... Args>
+entity component_container<T>::find_entity(Args&&... args) const
+{
+    return search.find(std::forward<Args>(args)...);
+}
+
+template<typename T>
+T* component_container<T>::get_unsafe(entity e)
+{
+    if constexpr(tag_component)
+    {
+        // We can return basically anything, since tag components are just tags.
+        // As long as it's not nullptr, that is.
+        return reinterpret_cast<T*>(&bucket_components);
+    }
+    else return &bucket_components[e>>bucket_exp][e&bucket_mask];
+}
+
+template<typename T>
+void component_container<T>::destroy()
+{
+    // Cannot batch while destroying.
+    if(batching)
+        finish_batch();
+
+    // Destruct all entries
+    clear();
+#ifndef MONKERO_CONTAINER_DEALLOCATE_BUCKETS
+    for(size_t i = 0; i < bucket_count; ++i)
+    {
+        if(bucket_bitmask[i])
+            delete bucket_bitmask[i];
+        if(bucket_jump_table[i])
+            delete bucket_jump_table[i];
+        if constexpr(!tag_component)
+        {
+            if(bucket_components[i])
+                delete bucket_components[i];
+        }
+        if(bucket_batch_bitmask[i])
+            delete bucket_batch_bitmask[i];
+    }
+#endif
+
+    // Free top-level arrays (bottom-level arrays should have been deleted in
+    // clear().
+    if(bucket_bitmask)
+        delete[] bucket_bitmask;
+    if(top_bitmask)
+        delete[] top_bitmask;
+    if(bucket_jump_table)
+    {
+        // The initial jump table entry won't get erased otherwise, as it is a
+        // special case due to INVALID_ENTITY.
+        delete[] bucket_jump_table[0];
+        delete[] bucket_jump_table;
+    }
+    if constexpr(!tag_component)
+    {
+        if(bucket_components)
+            delete[] bucket_components;
+    }
+    if(batch_checklist)
+        delete[] batch_checklist;
+    if(bucket_batch_bitmask)
+        delete[] bucket_batch_bitmask;
+}
+
+template<typename T>
+void component_container<T>::jump_table_insert(entity id)
+{
+    // Assumes that the corresponding bitmask change has already been made.
+    std::uint32_t cur_hi = id >> bucket_exp;
+    std::uint32_t cur_lo = id & bucket_mask;
+    ensure_jump_table(cur_hi);
+
+    // Find the start of the preceding block.
+    entity prev_start_id = find_previous_entity(id);
+    std::uint32_t prev_start_hi = prev_start_id >> bucket_exp;
+    std::uint32_t prev_start_lo = prev_start_id & bucket_mask;
+    entity& prev_start = bucket_jump_table[prev_start_hi][prev_start_lo];
+
+    if(prev_start_id + 1 < id)
+    { // Make preceding block's end point back to its start
+        entity prev_end_id = id-1;
+        std::uint32_t prev_end_hi = prev_end_id >> bucket_exp;
+        std::uint32_t prev_end_lo = prev_end_id & bucket_mask;
+        ensure_jump_table(prev_end_hi);
+        entity& prev_end = bucket_jump_table[prev_end_hi][prev_end_lo];
+        prev_end = prev_start_id;
+    }
+
+    if(id + 1 < prev_start)
+    { // Make succeeding block's end point back to its start
+        entity next_end_id = prev_start-1;
+        std::uint32_t next_end_hi = next_end_id >> bucket_exp;
+        std::uint32_t next_end_lo = next_end_id & bucket_mask;
+        entity& next_end = bucket_jump_table[next_end_hi][next_end_lo];
+        next_end = id;
+    }
+
+    bucket_jump_table[cur_hi][cur_lo] = prev_start;
+    prev_start = id;
+}
+
+template<typename T>
+void component_container<T>::jump_table_erase(entity id)
+{
+    std::uint32_t hi = id >> bucket_exp;
+    std::uint32_t lo = id & bucket_mask;
+    entity prev = id-1;
+    std::uint32_t prev_hi = prev >> bucket_exp;
+    std::uint32_t prev_lo = prev & bucket_mask;
+
+    entity& prev_jmp = bucket_jump_table[prev_hi][prev_lo];
+    entity& cur_jmp = bucket_jump_table[hi][lo];
+    entity block_start = 0;
+    if(prev_jmp == id)
+    { // If previous existed
+        // It should jump where the current entity would have jumped
+        prev_jmp = cur_jmp;
+        block_start = prev;
+    }
+    else
+    { // If previous did not exist
+        // Find the starting entry of this block from it.
+        prev_hi = prev_jmp >> bucket_exp;
+        prev_lo = prev_jmp & bucket_mask;
+        // Update the starting entry to jump to our target.
+        bucket_jump_table[prev_hi][prev_lo] = cur_jmp;
+        block_start = prev_jmp;
+    }
+
+    // Ensure the skip block end knows to jump back as well.
+    if(cur_jmp != 0)
+    {
+        entity block_end = cur_jmp-1;
+        prev_hi = block_end >> bucket_exp;
+        prev_lo = block_end & bucket_mask;
+        bucket_jump_table[prev_hi][prev_lo] = block_start;
+    }
+}
+
+template<typename T>
+std::size_t component_container<T>::get_top_bitmask_size() const
+{
+    return bucket_count == 0 ? 0 : std::max(initial_bucket_count, bucket_count >> bitmask_shift);
+}
+
+template<typename T>
+bool component_container<T>::bitmask_empty(std::uint32_t bucket_index) const
+{
+    if(bucket_bitmask[bucket_index] == nullptr)
+        return true;
+    for(unsigned j = 0; j < bucket_bitmask_units; ++j)
+    {
+        if(bucket_bitmask[bucket_index][j] != 0)
+            return false;
+    }
+    return true;
+}
+
+template<typename T>
+void component_container<T>::bitmask_insert(entity id)
+{
+    std::uint32_t hi = id >> bucket_exp;
+    std::uint32_t lo = id & bucket_mask;
+    ensure_bitmask(hi);
+    bitmask_type& mask = bucket_bitmask[hi][lo>>bitmask_shift];
+    if(mask == 0)
+        top_bitmask[hi>>bitmask_shift] |= 1lu<<(hi&bitmask_mask);
+    mask |= 1lu<<(lo&bitmask_mask);
+}
+
+template<typename T>
+bool component_container<T>::bitmask_erase(entity id)
+{
+    std::uint32_t hi = id >> bucket_exp;
+    std::uint32_t lo = id & bucket_mask;
+    bucket_bitmask[hi][lo>>bitmask_shift] &= ~(1lu<<(lo&bitmask_mask));
+    if(bucket_bitmask[hi][lo>>bitmask_shift] == 0 && bitmask_empty(hi))
+    {
+        top_bitmask[hi>>bitmask_shift] &= ~(1lu<<(hi&bitmask_mask));
+        return true;
+    }
+    return false;
+}
+
+template<typename T>
+template<typename... Args>
+void component_container<T>::bucket_insert(entity id, Args&&... args)
+{
+    // This function assumes that there isn't an existing entity at the same
+    // position.
+    T* data = nullptr;
+    if constexpr(tag_component)
+    {
+        data = reinterpret_cast<T*>(&bucket_components);
+        new (&bucket_components) T(std::forward<Args>(args)...);
+    }
+    else
+    {
+        std::uint32_t hi = id >> bucket_exp;
+        std::uint32_t lo = id & bucket_mask;
+
+        // If this component container doesn't exist yet, create it.
+        if(bucket_components[hi] == nullptr)
+        {
+            bucket_components[hi] = reinterpret_cast<T*>(
+                new t_mimicker[1u<<bucket_exp]
+            );
+        }
+        data = &bucket_components[hi][lo];
+    }
+    // Create the related component here.
+    new (data) T(std::forward<Args>(args)...);
+    signal_add(id, data);
+}
+
+template<typename T>
+void component_container<T>::bucket_erase(entity id, bool signal)
+{
+    // This function assumes that the given entity exists.
+    T* data = nullptr;
+    if constexpr(tag_component)
+    {
+        data = reinterpret_cast<T*>(&bucket_components);
+    }
+    else
+    {
+        std::uint32_t hi = id >> bucket_exp;
+        std::uint32_t lo = id & bucket_mask;
+        data = &bucket_components[hi][lo];
+    }
+    if(signal) signal_remove(id, data);
+    data->~T();
+}
+
+template<typename T>
+void component_container<T>::bucket_self_erase(std::uint32_t i)
+{
+    (void)i;
+#ifdef MONKERO_CONTAINER_DEALLOCATE_BUCKETS
+    // If the bucket got emptied, nuke it.
+    delete[] bucket_bitmask[i];
+    bucket_bitmask[i] = nullptr;
+
+    if(bucket_batch_bitmask[i])
+    {
+        delete[] bucket_batch_bitmask[i];
+        bucket_batch_bitmask[i] = nullptr;
+    }
+
+    if constexpr(!tag_component)
+    {
+        delete[] reinterpret_cast<t_mimicker*>(bucket_components[i]);
+        bucket_components[i] = nullptr;
+    }
+#endif
+}
+
+template<typename T>
+void component_container<T>::try_jump_table_bucket_erase(std::uint32_t i)
+{
+    (void)i;
+#ifdef MONKERO_CONTAINER_DEALLOCATE_BUCKETS
+    // The first jump table bucket is always present, due to INVALID_ENTITY
+    // being the iteration starting point.
+    if(i == 0 || bucket_jump_table[i] == nullptr)
+        return;
+
+    // We can be removed if the succeeding bucket is also empty.
+    if(i+1 >= bucket_count || bucket_bitmask[i+1] == nullptr)
+    {
+        delete[] bucket_jump_table[i];
+        bucket_jump_table[i] = nullptr;
+    }
+#endif
+}
+
+template<typename T>
+void component_container<T>::ensure_bucket_space(entity id)
+{
+    if((id>>bucket_exp) < bucket_count)
+        return;
+
+    std::uint32_t new_bucket_count = std::max(initial_bucket_count, bucket_count);
+    while(new_bucket_count <= (id>>bucket_exp))
+        new_bucket_count *= 2;
+
+    bitmask_type** new_bucket_batch_bitmask = new bitmask_type*[new_bucket_count];
+    memcpy(new_bucket_batch_bitmask, bucket_batch_bitmask,
+        sizeof(bitmask_type*)*bucket_count);
+    memset(new_bucket_batch_bitmask+bucket_count, 0,
+        sizeof(bitmask_type*)*(new_bucket_count-bucket_count));
+    delete [] bucket_batch_bitmask;
+    bucket_batch_bitmask = new_bucket_batch_bitmask;
+
+    bitmask_type** new_bucket_bitmask = new bitmask_type*[new_bucket_count];
+    memcpy(new_bucket_bitmask, bucket_bitmask,
+        sizeof(bitmask_type*)*bucket_count);
+    memset(new_bucket_bitmask+bucket_count, 0,
+        sizeof(bitmask_type*)*(new_bucket_count-bucket_count));
+    delete [] bucket_bitmask;
+    bucket_bitmask = new_bucket_bitmask;
+
+    entity** new_bucket_jump_table = new entity*[new_bucket_count];
+    memcpy(new_bucket_jump_table, bucket_jump_table,
+        sizeof(entity*)*bucket_count);
+    memset(new_bucket_jump_table+bucket_count, 0,
+        sizeof(entity*)*(new_bucket_count-bucket_count));
+    delete [] bucket_jump_table;
+    bucket_jump_table = new_bucket_jump_table;
+
+    // Create initial jump table entry.
+    if(bucket_count == 0)
+    {
+        bucket_jump_table[0] = new entity[1 << bucket_exp];
+        memset(bucket_jump_table[0], 0, sizeof(entity)*(1 << bucket_exp));
+    }
+
+    if constexpr(!tag_component)
+    {
+        T** new_bucket_components = new T*[new_bucket_count];
+        memcpy(new_bucket_components, bucket_components,
+            sizeof(T*)*bucket_count);
+        memset(new_bucket_components+bucket_count, 0,
+            sizeof(T*)*(new_bucket_count-bucket_count));
+        delete [] bucket_components;
+        bucket_components = new_bucket_components;
+    }
+
+    std::uint32_t top_bitmask_count = get_top_bitmask_size();
+    std::uint32_t new_top_bitmask_count = std::max(
+        initial_bucket_count,
+        new_bucket_count >> bitmask_shift
+    );
+    if(top_bitmask_count != new_top_bitmask_count)
+    {
+        bitmask_type* new_top_bitmask = new bitmask_type[new_top_bitmask_count];
+        memcpy(new_top_bitmask, top_bitmask,
+            sizeof(bitmask_type)*top_bitmask_count);
+        memset(new_top_bitmask+top_bitmask_count, 0,
+            sizeof(bitmask_type)*(new_top_bitmask_count-top_bitmask_count));
+        delete [] top_bitmask;
+        top_bitmask = new_top_bitmask;
+    }
+
+    bucket_count = new_bucket_count;
+}
+
+template<typename T>
+void component_container<T>::ensure_bitmask(std::uint32_t bucket_index)
+{
+    if(bucket_bitmask[bucket_index] == nullptr)
+    {
+        bucket_bitmask[bucket_index] = new bitmask_type[bucket_bitmask_units];
+        std::memset(
+            bucket_bitmask[bucket_index], 0,
+            sizeof(bitmask_type)*bucket_bitmask_units
+        );
+    }
+}
+
+template<typename T>
+void component_container<T>::ensure_jump_table(std::uint32_t bucket_index)
+{
+    if(!bucket_jump_table[bucket_index])
+    {
+        bucket_jump_table[bucket_index] = new entity[1 << bucket_exp];
+        memset(bucket_jump_table[bucket_index], 0, sizeof(entity)*(1 << bucket_exp));
+    }
+}
+
+template<typename T>
+bool component_container<T>::batch_change(entity id)
+{
+    std::uint32_t hi = id >> bucket_exp;
+    std::uint32_t lo = id & bucket_mask;
+    if(bucket_batch_bitmask[hi] == nullptr)
+    {
+        bucket_batch_bitmask[hi] = new bitmask_type[bucket_bitmask_units];
+        std::memset(
+            bucket_batch_bitmask[hi], 0,
+            sizeof(bitmask_type)*bucket_bitmask_units
+        );
+    }
+    bitmask_type& mask = bucket_batch_bitmask[hi][lo>>bitmask_shift];
+    bitmask_type bit = 1lu<<(lo&bitmask_mask);
+    mask ^= bit;
+    if(mask & bit)
+    { // If there will be a change, add this to the list.
+        if(batch_checklist_size == batch_checklist_capacity)
+        {
+            std::uint32_t new_batch_checklist_capacity = std::max(
+                initial_bucket_count,
+                batch_checklist_capacity * 2
+            );
+            entity* new_batch_checklist = new entity[new_batch_checklist_capacity];
+            memcpy(new_batch_checklist, batch_checklist,
+                sizeof(entity)*batch_checklist_capacity);
+            memset(new_batch_checklist + batch_checklist_capacity, 0,
+                sizeof(entity)*(new_batch_checklist_capacity-batch_checklist_capacity));
+            delete [] batch_checklist;
+            batch_checklist = new_batch_checklist;
+            batch_checklist_capacity = new_batch_checklist_capacity;
+        }
+        batch_checklist[batch_checklist_size] = id;
+        batch_checklist_size++;
+        return true;
+    }
+    return false;
+}
+
+template<typename T>
+entity component_container<T>::find_previous_entity(entity id)
+{
+    std::uint32_t hi = id >> bucket_exp;
+    std::uint32_t lo = id & bucket_mask;
+
+    // Try to find in the current bucket.
+    std::uint32_t prev_index = 0;
+    if(find_bitmask_previous_index(bucket_bitmask[hi], lo, prev_index))
+        return (hi << bucket_exp) + prev_index;
+
+    // If that failed, search from the top bitmask.
+    std::uint32_t bucket_index = 0;
+    if(!find_bitmask_previous_index(top_bitmask, hi, bucket_index))
+        return INVALID_ENTITY;
+
+    // Now, find the highest bit in the bucket that was found.
+    find_bitmask_top(
+        bucket_bitmask[bucket_index],
+        bucket_bitmask_units,
+        prev_index
+    );
+    return (bucket_index << bucket_exp) + prev_index;
+}
+
+
+template<typename T>
+void component_container<T>::signal_add(entity id, T* data)
+{
+    search.add_entity(id, *data);
+    ctx->emit(add_component<T>{id, data});
+}
+
+template<typename T>
+void component_container<T>::signal_remove(entity id, T* data)
+{
+    search.remove_entity(id, *data);
+    ctx->emit(remove_component<T>{id, data});
+}
+
+template<typename T>
+unsigned component_container<T>::bitscan_reverse(std::uint64_t mt)
+{
+#if defined(__GNUC__)
+    return 63 - __builtin_clzll(mt);
+#elif defined(_MSC_VER)
+    unsigned long index = 0;
+    _BitScanReverse64(&index, mt);
+    return index;
+#else
+    unsigned r = (mt > 0xFFFFFFFFF) << 5;
+    mt >>= r;
+    unsigned shift = (mt > 0xFFFF) << 4;
+    mt >>= shift;
+    r |= shift;
+    shift = (mt > 0xFF) << 3;
+    mt >>= shift;
+    r |= shift;
+    shift = (mt > 0xF) << 2;
+    mt >>= shift;
+    r |= shift;
+    shift = (mt > 0x3) << 1;
+    mt >>= shift;
+    r |= shift;
+    return r | (mt >> 1);
+#endif
+}
+
+template<typename T>
+bool component_container<T>::find_bitmask_top(
+    bitmask_type* bitmask,
+    std::uint32_t count,
+    std::uint32_t& top_index
+){
+    for(std::uint32_t j = 0, i = count-1; j < count; ++j, --i)
+    {
+        if(bitmask[i] != 0)
+        {
+            std::uint32_t index = bitscan_reverse(bitmask[i]);
+            top_index = (i << bitmask_shift) + index;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+template<typename T>
+bool component_container<T>::find_bitmask_previous_index(
+    bitmask_type* bitmask,
+    std::uint32_t index,
+    std::uint32_t& prev_index
+){
+    if(!bitmask)
+        return false;
+
+    std::uint32_t bm_index = index >> bitmask_shift;
+    bitmask_type bm_mask = (1lu<<(index&bitmask_mask))-1;
+    bitmask_type cur_mask = bitmask[bm_index] & bm_mask;
+    if(cur_mask != 0)
+    {
+        std::uint32_t index = bitscan_reverse(cur_mask);
+        prev_index = (bm_index << bitmask_shift) + index;
+        return true;
+    }
+
+    return find_bitmask_top(bitmask, bm_index, prev_index);
+}
+
+template<typename T>
+component_container<T>::iterator::iterator(component_container& from, entity e)
+:   from(&from), current_entity(e), current_bucket(e>>bucket_exp)
+{
+    if(current_bucket < from.bucket_count)
+    {
+        current_jump_table = from.bucket_jump_table[current_bucket];
+        if constexpr(!tag_component)
+        {
+            current_components = from.bucket_components[current_bucket];
+        }
+    }
+}
+
+void component_container_entity_advancer::advance()
+{
+    current_entity = current_jump_table[current_entity&bucket_mask];
+    std::uint32_t next_bucket = current_entity >> bucket_exp;
+    if(next_bucket != current_bucket)
+    {
+        current_bucket = next_bucket;
+        current_jump_table = (*bucket_jump_table)[current_bucket];
+    }
+}
+
+template<typename T>
+typename component_container<T>::iterator& component_container<T>::iterator::operator++()
+{
+    current_entity = current_jump_table[current_entity&bucket_mask];
+    std::uint32_t next_bucket = current_entity >> bucket_exp;
+    if(next_bucket != current_bucket)
+    {
+        current_bucket = next_bucket;
+        current_jump_table = from->bucket_jump_table[current_bucket];
+        if constexpr(!tag_component)
+        {
+            current_components = from->bucket_components[current_bucket];
+        }
+    }
+    return *this;
+}
+
+template<typename T>
+typename component_container<T>::iterator component_container<T>::iterator::operator++(int)
+{
+    iterator it(*this);
+    ++it;
+    return it;
+}
+
+template<typename T>
+std::pair<entity, T*> component_container<T>::iterator::operator*()
+{
+    if constexpr(tag_component)
+    {
+        return {
+            current_entity,
+            reinterpret_cast<T*>(&from->bucket_components)
+        };
+    }
+    else
+    {
+        return {
+            current_entity,
+            &current_components[current_entity&bucket_mask]
+        };
+    }
+}
+
+template<typename T>
+std::pair<entity, const T*> component_container<T>::iterator::operator*() const
+{
+    if constexpr(tag_component)
+    {
+        return {
+            current_entity,
+            reinterpret_cast<const T*>(&from->bucket_components)
+        };
+    }
+    else
+    {
+        return {
+            current_entity,
+            &current_components[current_entity&bucket_mask]
+        };
+    }
+}
+
+template<typename T>
+bool component_container<T>::iterator::operator==(const iterator& other) const
+{
+    return other.current_entity == current_entity;
+}
+
+template<typename T>
+bool component_container<T>::iterator::operator!=(const iterator& other) const
+{
+    return other.current_entity != current_entity;
+}
+
+template<typename T>
+bool component_container<T>::iterator::try_advance(entity id)
+{
+    if(current_entity == id)
+        return true;
+
+    std::uint32_t next_bucket = id >> bucket_exp;
+    std::uint32_t lo = id & bucket_mask;
+    if(
+        id < current_entity ||
+        next_bucket >= from->bucket_count ||
+        !from->bucket_bitmask[next_bucket] ||
+        !(from->bucket_bitmask[next_bucket][lo>>bitmask_shift] & (1lu << (lo&bitmask_mask)))
+    ) return false;
+
+    current_entity = id;
+    if(next_bucket != current_bucket)
+    {
+        current_bucket = next_bucket;
+        current_jump_table = from->bucket_jump_table[current_bucket];
+        if constexpr(!tag_component)
+            current_components = from->bucket_components[current_bucket];
+    }
+    return true;
+}
+
+template<typename T>
+component_container<T>::iterator::operator bool() const
+{
+    return current_entity != INVALID_ENTITY;
+}
+
+template<typename T>
+entity component_container<T>::iterator::get_id() const
+{
+    return current_entity;
+}
+
+template<typename T>
+component_container<T>* component_container<T>::iterator::get_container() const
+{
+    return from;
+}
+
+template<typename T>
+component_container_entity_advancer component_container<T>::iterator::get_advancer()
+{
+    return component_container_entity_advancer{
+        bucket_mask,
+        bucket_exp,
+        &from->bucket_jump_table,
+        current_bucket,
+        current_entity,
+        current_jump_table
+    };
+}
+
+#ifdef MONKERO_CONTAINER_DEBUG_UTILS
+template<typename T>
+bool component_container<T>::test_invariant() const
+{
+    // Check bitmask internal validity
+    std::uint32_t top_bitmask_count = get_top_bitmask_size();
+    std::uint32_t top_index = 0;
+    bool found = top_bitmask && find_bitmask_top(
+        top_bitmask,
+        top_bitmask_count,
+        top_index
+    );
+    std::uint32_t bitmask_entity_count = 0;
+    if(found && top_index >= bucket_count && !batching)
+    {
+        std::cout << "Top bitmask has a higher bit than bucket count!\n";
+        return false;
+    }
+
+    for(std::uint32_t i = 0; i < bucket_count; ++i)
+    {
+        int present = (top_bitmask[i>>bitmask_shift] >> (i&bitmask_mask))&1;
+        if(present && !bucket_bitmask[i] && !batching)
+        {
+            std::cout << "Bitmask bucket that should exist is null instead!\n";
+            return false;
+        }
+        bool found = bucket_bitmask[i] && find_bitmask_top(
+            bucket_bitmask[i],
+            bucket_bitmask_units,
+            top_index
+        );
+        if(present && !found && !batching)
+        {
+            std::cout << "Empty bitmask bucket marked as existing in the top-level!\n";
+            return false;
+        }
+        else if(!present && found && !batching)
+        {
+            std::cout << "Non-empty bitmask bucket marked as nonexistent in the top-level!\n";
+            return false;
+        }
+        if(bucket_bitmask[i])
+        {
+            for(std::uint32_t j = 0; j < bucket_bitmask_units; ++j)
+            {
+                bitmask_entity_count += __builtin_popcountll(bucket_bitmask[i][j]);
+            }
+        }
+    }
+
+    if(!batching && bitmask_entity_count != entity_count)
+    {
+        std::cout << "Number of entities in bitmask does not match tracked number!\n";
+        return false;
+    }
+
+    // Check jump table internal validity
+    std::uint32_t jump_table_entity_count = 0;
+    if(entity_count != 0)
+    {
+        entity prev_id = 0;
+        entity id = bucket_jump_table[0][0];
+        while(id != 0)
+        {
+            bitmask_type* bm = bucket_bitmask[id>>bucket_exp];
+            bool present = false;
+            if(bm)
+            {
+                entity lo = id & bucket_mask;
+                present = (bm[lo>>bitmask_shift] >> (lo&bitmask_mask))&1;
+            }
+            if(!present && !batching)
+            {
+                std::cout << "Jump table went to a non-existent entity!\n";
+                return false;
+            }
+
+            entity preceding_id = id-1;
+            entity prec_next_id = bucket_jump_table[preceding_id>>bucket_exp][preceding_id&bucket_mask];
+            if(prec_next_id != id && prec_next_id != prev_id)
+            {
+                std::cout << "Jump table preceding entry has invalid target id!\n";
+                return false;
+            }
+
+            jump_table_entity_count++;
+            prev_id = id;
+            entity next_id = bucket_jump_table[id>>bucket_exp][id&bucket_mask];
+            if(next_id != 0 && next_id <= id)
+            {
+                std::cout << "Jump table did not jump forward!\n";
+                return false;
+            }
+            id = next_id;
+        }
+    }
+
+    if(jump_table_entity_count != entity_count && !batching)
+    {
+        std::cout << "Number of entities in jump table does not match tracked number!\n";
+        return false;
+    }
+    return true;
+}
+
+template<typename T>
+void component_container<T>::print_bitmask() const
+{
+    for(std::uint32_t i = 0; i < bucket_count; ++i)
+    {
+        int present = (top_bitmask[i>>bitmask_shift] >> (i&bitmask_mask))&1;
+        std::cout << "bucket " << i << " ("<< (present ? "present" : "empty") << "): ";
+        if(!bucket_bitmask[i])
+            std::cout << "(null)\n";
+        else
+        {
+            for(std::uint32_t j = 0; j < bucket_bitmask_units; ++j)
+            {
+                for(std::uint32_t k = 0; k < 64; ++k)
+                {
+                    std::cout << ((bucket_bitmask[i][j]>>k)&1);
+                }
+                std::cout << " ";
+            }
+            std::cout << "\n";
+        }
+    }
+}
+
+template<typename T>
+void component_container<T>::print_jump_table() const
+{
+    std::uint32_t k = 0;
+    for(std::uint32_t i = 0; i < bucket_count; ++i)
+    {
+        if(bucket_jump_table[i] == nullptr)
+        {
+            std::uint32_t k_start = k;
+            std::uint32_t i_start = i;
+            for(; i < bucket_count && bucket_jump_table[i] == nullptr; ++i)
+                k += 1<<bucket_exp;
+            --i;
+            std::uint32_t k_end = k-1;
+            std::uint32_t i_end = i;
+            if(i_start == i_end)
+                std::cout << "bucket " << i_start << ": " << k_start << " to " << k_end;
+            else
+                std::cout << "buckets " << i_start << " to " << i_end << ": " << k_start << " to " << k_end;
+        }
+        else
+        {
+            std::cout << "bucket " << i << ":\n";
+
+            std::cout << "\tindices: |";
+
+            for(int j = 0; j < (1<<bucket_exp); ++j, ++k)
+                std::cout << " " << k << " |";
+
+            std::cout << "\n\tdata:    |";
+            for(int j = 0; j < (1<<bucket_exp); ++j)
+            {
+                std::cout << " " << bucket_jump_table[i][j] << " |";
+            }
+        }
+        std::cout << "\n";
+    }
+}
+#endif
+
+ecs::ecs()
+: id_counter(1), subscriber_counter(0), defer_batch(0)
+{
 }
 
 ecs::~ecs()
@@ -757,96 +2017,37 @@ ecs::~ecs()
     clear_entities();
 }
 
+template<bool pass_id, typename... Components>
 template<typename Component>
-ecs::foreach_iterator_base<Component>::foreach_iterator_base(Container& c)
-:   components(c.components.data()), ids(c.ids.data()), begin(ids),
-    end(ids+c.ids.size()), dense(false)
+struct ecs::foreach_impl<pass_id, Components...>::iterator_wrapper<Component*>
 {
-}
-
-template<typename Component>
-bool ecs::foreach_iterator_base<Component>::finished()
-{
-    return begin == end;
-}
-
-template<typename Component>
-entity ecs::foreach_iterator_base<Component>::advance_up_to(entity id)
-{
-    if(dense)
-    {
-        ++begin;
-        entity* last = std::min(end, begin + (id - *begin));
-        begin = std::lower_bound(begin, last, id);
-        return begin != end ? *begin : INVALID_ENTITY;
-    }
-    else
-    {
-        for(; begin < end; ++begin)
-        {
-            if(*begin >= id)
-                return *begin;
-        }
-        return INVALID_ENTITY;
-    }
-}
-
-template<typename Component>
-entity ecs::foreach_iterator_base<Component>::advance_one()
-{
-    ++begin;
-    return begin != end ? *begin : INVALID_ENTITY;
-}
-
-template<typename Component>
-entity ecs::foreach_iterator_base<Component>::get_id() const
-{
-    return *begin;
-}
-
-template<typename Component>
-auto ecs::foreach_iterator<Component&>::get(entity) -> Type&
-{
-    return *this->components[this->begin-this->ids].get();
-}
-
-template<typename Component>
-auto ecs::foreach_iterator<Component*>::get(entity id) -> Type*
-{
-    if(this->finished())
-        return nullptr;
-
-    if(*this->begin != id) return nullptr;
-    return this->components[this->begin-this->ids].get();
-}
+    static constexpr bool required = false;
+    typename component_container<std::decay_t<std::remove_pointer_t<std::decay_t<Component>>>>::iterator iter;
+};
 
 template<bool pass_id, typename... Components>
 template<typename F>
-void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
+void ecs::foreach_impl<pass_id, Components...>::foreach(ecs& ctx, F&& f)
 {
     ctx.start_batch();
 
-    std::tuple<foreach_iterator<Components>...>
-        component_it(ctx.get_container<
-            std::decay_t<std::remove_pointer_t<std::decay_t<Components>>>
-        >()...);
+    std::tuple component_it(make_iterator<Components>(ctx)...);
 #define monkero_apply_tuple(...) \
     std::apply([&](auto&... it){return (__VA_ARGS__);}, component_it)
 
     // Note that all checks based on it.required are compile-time, it's
     // constexpr!
-    constexpr bool all_optional = monkero_apply_tuple(!it.required && ...);
+    constexpr bool all_optional = (std::is_pointer_v<Components> && ...);
 
     if constexpr(sizeof...(Components) == 1)
     {
         // If we're only iterating one category, we can do it very quickly!
-        auto& iter = std::get<0>(component_it);
-        while(!iter.finished())
+        auto& it = std::get<0>(component_it).iter;
+        while(it)
         {
-            entity cur_id = iter.get_id();
-            if constexpr(pass_id) f(cur_id, iter.get(cur_id));
-            else f(iter.get(cur_id));
-            iter.advance_one();
+            auto [cur_id, ptr] = *it;
+            call(std::forward<F>(f), cur_id, ptr);
+            ++it;
         }
     }
     else if constexpr(all_optional)
@@ -854,55 +2055,83 @@ void ecs::foreach_impl<pass_id, Components...>::call(ecs& ctx, F&& f)
         // If all are optional, iteration logic has to differ a bit. The other
         // version would never quit as there would be zero finished required
         // iterators.
-        while(monkero_apply_tuple(!it.finished() || ...))
+        while(monkero_apply_tuple((bool)it.iter || ...))
         {
             entity cur_id = monkero_apply_tuple(std::min({
-                (it.finished() ? INVALID_ENTITY : it.get_id())...
+                (it.iter ? it.iter.get_id() : std::numeric_limits<entity>::max())...
             }));
-            if constexpr(pass_id) monkero_apply_tuple(f(cur_id, it.get(cur_id)...));
-            else monkero_apply_tuple(f(it.get(cur_id)...));
+            monkero_apply_tuple(call(
+                std::forward<F>(f),
+                cur_id,
+                (it.iter.get_id() == cur_id ? (*it.iter).second : nullptr)...
+            ));
             monkero_apply_tuple(
-                (!it.finished() && it.get_id() == cur_id
-                 ? (it.advance_one(), void()) : void()), ...
+                (it.iter && it.iter.get_id() == cur_id ? (++it.iter, void()) : void()), ...
             );
         }
     }
     else
     {
-        ssize_t min_dense_length = monkero_apply_tuple(std::min({
-            (it.required ? it.end - it.begin : INVALID_ENTITY)...
-        })) * CACHE_LINE_SIZE;
-        monkero_apply_tuple(
-            (min_dense_length < it.end - it.begin ? (it.dense = true) : (it.dense = false)), ...
-        );
-        entity cur_id = monkero_apply_tuple(std::max({
-            (it.required ? (it.finished() ? INVALID_ENTITY : it.get_id()) : 0)...
-        }));
         // This is the generic implementation for when there's multiple
         // components where some are potentially optional.
-        while(cur_id != INVALID_ENTITY)
+        std::size_t min_length = monkero_apply_tuple(std::min({
+            (it.required ?
+                it.iter.get_container()->size() :
+                std::numeric_limits<std::size_t>::max()
+            )...
+        }));
+
+        component_container_entity_advancer advancer = {};
+        monkero_apply_tuple(
+            (it.required && it.iter.get_container()->size() == min_length ?
+                (advancer = it.iter.get_advancer(), void()): void()), ...
+        );
+
+        while(advancer.current_entity != INVALID_ENTITY)
         {
-            // Check if all entries have the same id. For each entry that
-            // doesn't, advance to the next id.
-            bool all_required_equal = monkero_apply_tuple(
-                (it.required ?
-                    (it.get_id() == cur_id ?
-                        true : ((cur_id = it.advance_up_to(cur_id)), false)) :
-                    (it.finished() || it.get_id() >= cur_id ?
-                        true : (it.advance_up_to(cur_id), true))) && ...
+            bool have_all_required = monkero_apply_tuple(
+                (it.iter.try_advance(advancer.current_entity) || !it.required) && ...
             );
-            if(all_required_equal)
+            if(have_all_required)
             {
-                if constexpr(pass_id)
-                    monkero_apply_tuple(f(cur_id, it.get(cur_id)...));
-                else monkero_apply_tuple(f(it.get(cur_id)...));
-                monkero_apply_tuple((it.required ? (cur_id = std::max(cur_id, it.advance_one())), void(): void()), ...);
+                monkero_apply_tuple(call(
+                    std::forward<F>(f), advancer.current_entity,
+                    (it.iter.get_id() == advancer.current_entity ? (*it.iter).second : nullptr)...
+                ));
             }
+            advancer.advance();
         }
     }
 #undef monkero_apply_tuple
 
     ctx.finish_batch();
+}
+
+template<bool pass_id, typename... Components>
+template<typename Component>
+struct ecs::foreach_impl<pass_id, Components...>::converter<Component*>
+{
+    template<typename T>
+    static inline T* convert(T* val) { return val; }
+};
+
+template<bool pass_id, typename... Components>
+template<typename Component>
+template<typename T>
+T& ecs::foreach_impl<pass_id, Components...>::converter<Component>::convert(T* val)
+{
+    return *val;
+}
+
+template<bool pass_id, typename... Components>
+template<typename F>
+void ecs::foreach_impl<pass_id, Components...>::call(
+    F&& f,
+    entity id,
+    std::decay_t<std::remove_pointer_t<std::decay_t<Components>>>*... args
+){
+    if constexpr(pass_id) f(id, converter<Components>::convert(args)...);
+    else f(converter<Components>::convert(args)...);
 }
 
 template<typename T, typename=void>
@@ -931,7 +2160,7 @@ void ecs::foreach(F&& f)
     // actually using the std::function wrapper at runtime!
     decltype(
         foreach_redirector(std::function(f))
-    )::call(*this, std::forward<F>(f));
+    )::foreach(*this, std::forward<F>(f));
 }
 
 template<typename F>
@@ -964,127 +2193,55 @@ entity ecs::add(Components&&... components)
     return id;
 }
 
+template<typename Component, typename... Args>
+void ecs::emplace(entity id, Args&&... args)
+{
+    try_attach_dependencies<Component>(id);
+
+    get_container<Component>().emplace(
+        id, std::forward<Args>(args)...
+    );
+}
+
 template<typename... Components>
 void ecs::attach(entity id, Components&&... components)
 {
     (try_attach_dependencies<Components>(id), ...);
 
     (
-        get_container<Components>().add(
-            *this, id, std::forward<Components>(components)
+        get_container<Components>().insert(
+            id, std::forward<Components>(components)
         ), ...
     );
 }
 
-void ecs::start_batch()
-{
-    ++defer_batch;
-}
-
-void ecs::finish_batch()
-{
-    if(defer_batch > 0)
-    {
-        --defer_batch;
-        if(defer_batch == 0)
-            resolve_pending();
-    }
-}
-
-template<typename Component>
-size_t ecs::count() const
-{
-    return get_container<Component>().count();
-}
-
-template<typename Component>
-bool ecs::has(entity id) const
-{
-    return get<Component>(id) != nullptr;
-}
-
-template<typename Component>
-const Component* ecs::get(entity id) const
-{
-    return get_container<Component>().get(id);
-}
-
-template<typename Component>
-Component* ecs::get(entity id)
-{
-    return get_container<Component>().get(id);
-}
-
-template<typename Component>
-entity ecs::get_entity(size_t index) const
-{
-    return get_container<Component>().get_entity(index);
-}
-
-template<typename Component, typename... Args>
-Component* ecs::find_component(Args&&... args)
-{
-    return get<Component>(
-        find<Component>(std::forward<Args>(args)...)
-    );
-}
-
-template<typename Component, typename... Args>
-const Component* ecs::find_component(Args&&... args) const
-{
-    return get<Component>(
-        find<Component>(std::forward<Args>(args)...)
-    );
-}
-
-template<typename Component, typename... Args>
-entity ecs::find(Args&&... args) const
-{
-    return get_container<Component>().find_entity(std::forward<Args>(args)...);
-}
-
-template<typename Component>
-void ecs::update_search_index()
-{
-    return get_container<Component>().update_search_index(*this);
-}
-
-void ecs::update_search_indices()
-{
-    for(auto& c: components)
-        if(c) c->update_search_index(*this);
-}
-
-template<typename T, typename=void>
-struct is_receiver: std::false_type { };
-
-template<typename T>
-struct is_receiver<
-    T,
-    decltype((void)
-        std::declval<ecs>().add_receiver(*(T*)nullptr), void()
-    )
-> : std::true_type { };
-
 void ecs::remove(entity id)
 {
     for(auto& c: components)
-        if(c) c->remove(*this, id);
-    reusable_ids.push_back(id);
+        if(c) c->erase(id);
+    if(defer_batch == 0)
+        reusable_ids.push_back(id);
+    else
+        post_batch_reusable_ids.push_back(id);
 }
 
 template<typename Component>
 void ecs::remove(entity id)
 {
-    get_container<Component>().remove(*this, id);
+    get_container<Component>().erase(id);
 }
 
 void ecs::clear_entities()
 {
     for(auto& c: components)
-        if(c) c->clear(*this);
-    id_counter = 0;
-    reusable_ids.clear();
+        if(c) c->clear();
+
+    if(defer_batch == 0)
+    {
+        id_counter = 1;
+        reusable_ids.clear();
+        post_batch_reusable_ids.clear();
+    }
 }
 
 void ecs::concat(
@@ -1118,146 +2275,92 @@ entity ecs::copy(ecs& other, entity other_id)
     return id;
 }
 
-
-template<typename Component>
-void ecs::reserve(size_t count)
+void ecs::start_batch()
 {
-    get_container<Component>().reserve(count);
+    ++defer_batch;
+    if(defer_batch == 1)
+    {
+        for(auto& c: components)
+            c->start_batch();
+    }
+}
+
+void ecs::finish_batch()
+{
+    if(defer_batch > 0)
+    {
+        --defer_batch;
+        if(defer_batch == 0)
+        {
+            for(auto& c: components)
+                c->finish_batch();
+
+            reusable_ids.insert(
+                reusable_ids.end(),
+                post_batch_reusable_ids.begin(),
+                post_batch_reusable_ids.end()
+            );
+            post_batch_reusable_ids.clear();
+        }
+    }
 }
 
 template<typename Component>
-ecs::component_container<Component>::component_tag::component_tag()
+size_t ecs::count() const
 {
+    return get_container<Component>().size();
 }
 
 template<typename Component>
-ecs::component_container<Component>::component_tag::component_tag(Component&&)
+bool ecs::has(entity id) const
 {
+    return get_container<Component>().contains(id);
 }
 
 template<typename Component>
-Component* ecs::component_container<Component>::component_tag::get()
+const Component* ecs::get(entity id) const
 {
-    return reinterpret_cast<Component*>(this);
+    return get_container<Component>()[id];
 }
 
 template<typename Component>
-ecs::component_container<Component>::component_payload::component_payload()
+Component* ecs::get(entity id)
 {
+    return get_container<Component>()[id];
+}
+
+template<typename Component, typename... Args>
+Component* ecs::find_component(Args&&... args)
+{
+    return get<Component>(
+        find<Component>(std::forward<Args>(args)...)
+    );
+}
+
+template<typename Component, typename... Args>
+const Component* ecs::find_component(Args&&... args) const
+{
+    return get<Component>(
+        find<Component>(std::forward<Args>(args)...)
+    );
+}
+
+template<typename Component, typename... Args>
+entity ecs::find(Args&&... args) const
+{
+    return get_container<Component>().find_entity(std::forward<Args>(args)...);
 }
 
 template<typename Component>
-ecs::component_container<Component>::component_payload::component_payload(
-    Component&& c
-): c(std::move(c))
+void ecs::update_search_index()
 {
+    return get_container<Component>().update_search_index();
 }
 
-template<typename Component>
-Component* ecs::component_container<Component>::component_payload::get()
+void ecs::update_search_indices()
 {
-    return &c;
-}
-
-template<typename Component>
-ecs::component_container<Component>::component_indirect::component_indirect()
-{
-}
-
-template<typename Component>
-ecs::component_container<Component>::component_indirect::component_indirect(
-    Component* c
-): c(c)
-{
-}
-
-template<typename Component>
-Component* ecs::component_container<Component>::component_indirect::get()
-{
-    return c.get();
-}
-
-template<typename Component>
-typename ecs::component_container<Component>::component_tag&
-ecs::component_container<Component>::dummy_container::operator[](size_t) const
-{
-    return *(component_tag*)this;
-}
-
-template<typename Component>
-void ecs::component_container<Component>::dummy_container::resize(size_t)
-{}
-
-template<typename Component>
-void ecs::component_container<Component>::dummy_container::reserve(size_t)
-{}
-
-template<typename Component>
-void ecs::component_container<Component>::dummy_container::clear()
-{}
-
-template<typename Component>
-typename ecs::component_container<Component>::component_tag*
-ecs::component_container<Component>::dummy_container::begin()
-{
-    return (component_tag*)this;
-}
-
-template<typename Component>
-void ecs::component_container<Component>::dummy_container::erase(component_tag*)
-{}
-
-template<typename Component>
-typename ecs::component_container<Component>::dummy_container
-ecs::component_container<Component>::dummy_container::data() { return {}; }
-
-template<typename Component>
-typename ecs::component_container<Component>::component_tag&
-ecs::component_container<Component>::dummy_container::emplace_back(component_tag&&)
-{
-    return operator[](0);
-}
-
-template<typename Component>
-typename ecs::component_container<Component>::component_tag*
-ecs::component_container<Component>::dummy_container::emplace(component_tag*, component_tag&&)
-{
-    return begin();
-}
-
-template<typename Component>
-Component* ecs::component_container<Component>::get(entity id)
-{
-    // Check if this entity is pending for removal. If so, it doesn't really
-    // exist anymore.
-    size_t i = lower_bound(pending_removal_ids, id);
-    if(i != pending_removal_ids.size() && pending_removal_ids[i] == id)
-        return nullptr;
-
-    // Check if pending_addition has it.
-    i = lower_bound(pending_addition_ids, id);
-    if(i != pending_addition_ids.size() && pending_addition_ids[i] == id)
-        return pending_addition_components[i].get();
-
-    // Finally, check the big components vector has it.
-    i = lower_bound(ids, id);
-    if(i != ids.size() && ids[i] == id)
-        return components[i].get();
-
-    return nullptr;
-}
-
-template<typename Component>
-entity ecs::component_container<Component>::get_entity(size_t index) const
-{
-    return ids[index];
-}
-
-template<typename Component>
-template<typename... Args>
-entity ecs::component_container<Component>::find_entity(Args&&... args) const
-{
-    return search.find(std::forward<Args>(args)...);
+    for(auto& c: components)
+        if(c) c->update_search_index();
 }
 
 template<typename EventType>
@@ -1329,461 +2432,19 @@ void ecs::add_receiver(receiver<EventTypes...>& r)
     );
 }
 
-template<typename T>
-constexpr bool search_index_is_empty_default(
-    int,
-    typename T::empty_default_impl const * = nullptr
-){ return true; }
-
-template<typename T>
-constexpr bool search_index_is_empty_default(long)
-{ return false; }
-
-template<typename T>
-constexpr bool search_index_is_empty_default()
- { return search_index_is_empty_default<T>(0); }
-
 template<typename Component>
-void ecs::component_container<Component>::native_add(
-    ecs& ctx,
-    entity id,
-    std::conditional_t<use_indirect, Component*, Component&&> c
-){
-    if(ctx.defer_batch)
-    {
-        // Check if this entity is already pending for removal. Remove from
-        // that vector first if so.
-        size_t i = lower_bound(pending_removal_ids, id);
-        if(i != pending_removal_ids.size() && pending_removal_ids[i] == id)
-            pending_removal_ids.erase(pending_removal_ids.begin() + i);
-
-        // Then, add to pending_addition too, if not there yet.
-        i = lower_bound(pending_addition_ids, id);
-        if(i == pending_addition_ids.size() || pending_addition_ids[i] != id)
-        {
-            // Skip the search if nobody cares.
-            if(
-                ctx.get_handler_count<remove_component<Component>>() ||
-                !search_index_is_empty_default<decltype(search)>()
-            ){
-                // If this entity already exists in the components, signal the
-                // removal of the previous one.
-                size_t j = lower_bound(ids, id);
-                if(j != ids.size() && ids[j] == id)
-                    signal_remove(ctx, id, components[j].get());
-            }
-
-            pending_addition_ids.emplace(pending_addition_ids.begin()+i, id);
-            auto cit = pending_addition_components.emplace(
-                pending_addition_components.begin()+i,
-                std::move(c)
-            );
-            signal_add(ctx, id, cit->get());
-        }
-        else
-        {
-            signal_remove(ctx, id, pending_addition_components[i].get());
-            pending_addition_components[i] = component_data(std::move(c));
-            signal_add(ctx, id, pending_addition_components[i].get());
-        }
-    }
-    else
-    {
-        // If we can take the fast path of just dumping at the back, do it.
-        if(ids.size() == 0 || ids.back() < id)
-        {
-            ids.emplace_back(id);
-            auto& component = components.emplace_back(std::move(c));
-            signal_add(ctx, id, component.get());
-        }
-        else
-        {
-            size_t i = lower_bound(ids, id);
-            if(ids[i] != id)
-            {
-                ids.emplace(ids.begin() + i, id);
-                auto cit = components.emplace(components.begin()+i, std::move(c));
-                signal_add(
-                    ctx, id, cit->get()
-                );
-            }
-            else
-            {
-                signal_remove(ctx, id, components[i].get());
-                components[i] = component_data(std::move(c));
-                signal_add(ctx, id, components[i].get());
-            }
-        }
-    }
-}
-
-template<typename Component>
-void ecs::component_container<Component>::add(
-    ecs& ctx, entity id, Component* c
-){
-    if constexpr(use_indirect)
-        native_add(ctx, id, c);
-    else
-    {
-        native_add(ctx, id, std::move(*c));
-        delete c;
-    }
-}
-
-template<typename Component>
-void ecs::component_container<Component>::add(
-    ecs& ctx, entity id, Component&& c
-){
-    if constexpr(use_indirect)
-        native_add(ctx, id, new Component(std::move(c)));
-    else
-        native_add(ctx, id, std::move(c));
-}
-
-template<typename Component>
-void ecs::component_container<Component>::add(
-    ecs& ctx, entity id, const Component& c
-){
-    if constexpr(use_indirect)
-        native_add(ctx, id, new Component(c));
-    else
-        native_add(ctx, id, Component(c));
-}
-
-template<typename Component>
-void ecs::component_container<Component>::reserve(size_t count)
-{
-    ids.reserve(count);
-    components.reserve(count);
-    pending_removal_ids.reserve(count);
-    pending_addition_ids.reserve(count);
-    pending_addition_components.reserve(count);
-}
-
-template<typename Component>
-void ecs::component_container<Component>::remove(ecs& ctx, entity id)
-{
-    bool do_emit = ctx.get_handler_count<remove_component<Component>>() ||
-        !search_index_is_empty_default<decltype(search)>();
-
-    if(ctx.defer_batch)
-    {
-        // Check if this entity is already pending for addition. Remove from
-        // there first if so.
-        size_t i = lower_bound(pending_addition_ids, id);
-        if(i != pending_addition_ids.size() && pending_addition_ids[i] == id)
-        {
-            if(do_emit)
-            {
-                auto tmp = std::move(pending_addition_components[i]);
-                pending_addition_ids.erase(pending_addition_ids.begin() + i);
-                pending_addition_components.erase(pending_addition_components.begin() + i);
-                signal_remove(ctx, id, tmp.get());
-            }
-            else
-            {
-                pending_addition_ids.erase(pending_addition_ids.begin() + i);
-                pending_addition_components.erase(pending_addition_components.begin() + i);
-            }
-        }
-
-        // Then, add to proper removal too, if not there yet.
-        i = lower_bound(pending_removal_ids, id);
-        if(i == pending_removal_ids.size() || pending_removal_ids[i] != id)
-        {
-            pending_removal_ids.insert(pending_removal_ids.begin() + i, id);
-            if(do_emit)
-            {
-                size_t j = lower_bound(ids, id);
-                if(j != ids.size() && ids[j] == id)
-                    signal_remove(ctx, id, components[j].get());
-            }
-        }
-    }
-    else
-    {
-        size_t i = lower_bound(ids, id);
-        if(i != ids.size() && ids[i] == id)
-        {
-            if(do_emit)
-            {
-                auto tmp = std::move(components[i]);
-                ids.erase(ids.begin() + i);
-                components.erase(components.begin() + i);
-                signal_remove(ctx, id, tmp.get());
-            }
-            else
-            {
-                ids.erase(ids.begin() + i);
-                components.erase(components.begin() + i);
-            }
-        }
-    }
-}
-
-template<typename Component>
-void ecs::component_container<Component>::resolve_pending()
-{
-    // Start by removing.
-    if(pending_removal_ids.size() != 0)
-    {
-        size_t pi = 0;
-        // Start iterating from the last element <= first id to be removed.
-        // This could just be 0, but this should help with
-        // performance in the common-ish case where most transient entities are
-        // also the most recently added ones.
-        size_t ri = lower_bound(ids, pending_removal_ids[pi]);
-        size_t wi = ri;
-        int removed_count = 0;
-
-        while(pi != pending_removal_ids.size() && ri != ids.size())
-        {
-            // If this id is equal, this is the entry that should be removed.
-            if(pending_removal_ids[pi] == ids[ri])
-            {
-                pi++;
-                ri++;
-                removed_count++;
-            }
-            // Skip all pending removals that aren't be in the list.
-            else if(pending_removal_ids[pi] < ids[ri])
-            {
-                pi++;
-            }
-            else if(ids[ri] < pending_removal_ids[pi])
-            {
-                // Compact the vector.
-                if(wi != ri)
-                {
-                    components[wi] = std::move(components[ri]);
-                    ids[wi] = ids[ri];
-                }
-
-                // Advance to the next entry.
-                ++wi;
-                ++ri;
-            }
-        }
-
-        if(removed_count != 0)
-            while(ri != ids.size())
-            {
-                components[wi] = std::move(components[ri]);
-                ids[wi] = ids[ri];
-                ++wi;
-                ++ri;
-            }
-
-        ids.resize(ids.size()-removed_count);
-        components.resize(ids.size());
-        pending_removal_ids.clear();
-    }
-
-    // There are two routes for addition, the fast one is for adding at the end,
-    // which is the most common use case.
-    if(
-        pending_addition_ids.size() != 0 && (
-            ids.size() == 0 || ids.back() < pending_addition_ids.front()
-        )
-    ){  // Fast route, only used when all additions are after the last
-        // already-extant entity.
-        size_t needed_size = ids.size() + pending_addition_ids.size();
-        if(ids.capacity() < needed_size)
-        {
-            components.reserve(std::max(ids.capacity() * 2, needed_size));
-            ids.reserve(std::max(ids.capacity() * 2, needed_size));
-        }
-        for(size_t i = 0; i < pending_addition_ids.size(); ++i)
-        {
-            components.emplace_back(std::move(pending_addition_components[i]));
-            ids.emplace_back(pending_addition_ids[i]);
-        }
-        pending_addition_ids.clear();
-        pending_addition_components.clear();
-    }
-    else if(pending_addition_ids.size() != 0)
-    { // Slow route, handles duplicates and interleaved additions.
-        // Handle duplicates first.
-        {
-            size_t pi = 0;
-            size_t wi = 0;
-            while(pi != pending_addition_ids.size() && wi != ids.size())
-            {
-                if(pending_addition_ids[pi] == ids[wi])
-                {
-                    components[wi] = std::move(pending_addition_components[pi]);
-                    ids[wi] = pending_addition_ids[pi];
-                    // TODO: We should probably avoid these erases, they're
-                    // likely slow.
-                    pending_addition_ids.erase(pending_addition_ids.begin() + pi);
-                    pending_addition_components.erase(pending_addition_components.begin() + pi);
-                    ++wi;
-                }
-                else if(pending_addition_ids[pi] < ids[wi]) ++pi;
-                else ++wi;
-            }
-        }
-
-        // If something is still left, actually perform additions.
-        if(pending_addition_ids.size() != 0)
-        {
-            ids.resize(ids.size() + pending_addition_ids.size());
-            components.resize(ids.size());
-
-            size_t pi = 0;
-            size_t wi = 0;
-            size_t ri = wi+pending_addition_ids.size();
-
-            while(pi != pending_addition_ids.size() && ri != ids.size())
-            {
-                size_t pir = pending_addition_ids.size()-1-pi;
-                size_t rir = ids.size()-1-ri;
-                size_t wir = ids.size()-1-wi;
-
-                if(pending_addition_ids[pir] > ids[rir])
-                {
-                    components[wir] = std::move(pending_addition_components[pir]);
-                    ids[wir] = pending_addition_ids[pir];
-                    ++pi;
-                }
-                else
-                {
-                    components[wir] = std::move(components[rir]);
-                    ids[wir] = ids[rir];
-                    ++ri;
-                }
-                ++wi;
-            }
-
-            while(pi != pending_addition_ids.size())
-            {
-                size_t pir = pending_addition_ids.size()-1-pi;
-                size_t wir = ids.size()-1-wi;
-                components[wir] = std::move(pending_addition_components[pir]);
-                ids[wir] = pending_addition_ids[pir];
-                ++pi;
-                ++wi;
-            }
-            pending_addition_ids.clear();
-            pending_addition_components.clear();
-        }
-    }
-}
-
-template<typename Component>
-void ecs::component_container<Component>::clear(ecs& ctx)
-{
-    bool do_emit = ctx.get_handler_count<remove_component<Component>>() ||
-        !search_index_is_empty_default<decltype(search)>();
-
-    if(ctx.defer_batch)
-    {
-        // If batching, we can't actually clear everything now. We will simply
-        // have to queue everything for removal.
-        while(pending_addition_ids.size() > 0)
-            remove(ctx, pending_addition_ids.back());
-        for(entity id: ids)
-            remove(ctx, id);
-    }
-    else if(!do_emit)
-    {
-        // If we aren't going to emit anything and we don't batch, life is easy.
-        ids.clear();
-        components.clear();
-        pending_removal_ids.clear();
-        pending_addition_ids.clear();
-        pending_addition_components.clear();
-    }
-    else
-    {
-        // The most difficult case, we don't batch but we still need to emit.
-        auto tmp_ids(std::move(ids));
-        auto tmp_components(std::move(components));
-        ids.clear();
-        components.clear();
-
-        for(size_t i = 0; i < tmp_ids.size(); ++i)
-            signal_remove(ctx, tmp_ids[i], tmp_components[i].get());
-    }
-}
-
-template<typename Component>
-size_t ecs::component_container<Component>::count() const
-{
-    return ids.size();
-}
-
-template<typename Component>
-void ecs::component_container<Component>::update_search_index(ecs& ctx)
-{
-    search.update(ctx);
-}
-
-template<typename Component>
-void ecs::component_container<Component>::list_entities(
-    std::map<entity, entity>& translation_table
-){
-    for(entity id: ids)
-        translation_table[id] = INVALID_ENTITY;
-}
-
-template<typename Component>
-void ecs::component_container<Component>::concat(
-    ecs& ctx,
-    const std::map<entity, entity>& translation_table
-){
-    if constexpr(std::is_copy_constructible_v<Component>)
-    {
-        for(size_t i = 0; i < ids.size(); ++i)
-            ctx.attach(translation_table.at(ids[i]), Component{*components[i].get()});
-    }
-}
-
-template<typename Component>
-void ecs::component_container<Component>::copy(
-    ecs& target,
-    entity result_id,
-    entity original_id
-){
-    if constexpr(std::is_copy_constructible_v<Component>)
-    {
-        Component* comp = get(original_id);
-        if(comp) target.attach(result_id, Component{*comp});
-    }
-}
-
-
-template<typename Component>
-void ecs::component_container<Component>::signal_add(ecs& ctx, entity id, Component* data)
-{
-    search.add_entity(id, *data);
-    ctx.emit(add_component<Component>{id, data});
-}
-
-template<typename Component>
-void ecs::component_container<Component>::signal_remove(ecs& ctx, entity id, Component* data)
-{
-    search.remove_entity(id, *data);
-    ctx.emit(remove_component<Component>{id, data});
-}
-
-template<typename Component>
-ecs::component_container<Component>& ecs::get_container() const
+component_container<Component>& ecs::get_container() const
 {
     size_t key = get_component_type_key<Component>();
     if(components.size() <= key) components.resize(key+1);
     auto& base_ptr = components[key];
     if(!base_ptr)
     {
-        base_ptr.reset(new component_container<Component>());
+        base_ptr.reset(new component_container<Component>(*const_cast<ecs*>(this)));
+        if(defer_batch > 0)
+            base_ptr->start_batch();
     }
     return *static_cast<component_container<Component>*>(base_ptr.get());
-}
-
-void ecs::resolve_pending()
-{
-    for(auto& c: components)
-        if(c) c->resolve_pending();
 }
 
 template<typename Component>
@@ -1838,33 +2499,5 @@ ensure_dependency_components_exist(entity id, ecs& ctx)
     ((ctx.has<DependencyComponents>(id) ? void() : ctx.attach(id, DependencyComponents())), ...);
 }
 
-event_subscription::event_subscription(ecs* ctx, size_t subscription_id)
-: ctx(ctx), subscription_id(subscription_id)
-{
 }
-
-event_subscription::event_subscription(event_subscription&& other)
-: ctx(other.ctx), subscription_id(other.subscription_id)
-{
-    other.ctx = nullptr;
-}
-
-event_subscription::~event_subscription()
-{
-    if(ctx)
-        ctx->remove_event_handler(subscription_id);
-}
-
-template<typename Component>
-void search_index<Component>::add_entity(entity, const Component&) {}
-
-template<typename Component>
-void search_index<Component>::update(ecs&) {}
-
-template<typename Component>
-void search_index<Component>::remove_entity(entity, const Component&) {}
-
-}
-
 #endif
-
