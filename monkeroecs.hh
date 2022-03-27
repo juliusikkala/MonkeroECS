@@ -886,7 +886,7 @@ void component_container<T>::emplace(entity id, Args&&... args)
             // If there was already a change, that means that there was an
             // existing batched erase. That means that we can replace an
             // existing object instead.
-            bucket_erase(id, false);
+            bucket_erase(id, true);
         }
         bucket_insert(id, std::forward<Args>(args)...);
     }
