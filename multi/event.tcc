@@ -28,7 +28,7 @@ SOFTWARE.
 
 namespace monkero
 {
-event_subscription::event_subscription(ecs* ctx, std::size_t subscription_id)
+event_subscription::event_subscription(scene* ctx, std::size_t subscription_id)
 : ctx(ctx), subscription_id(subscription_id)
 {
 }

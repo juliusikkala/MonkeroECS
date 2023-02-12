@@ -28,7 +28,7 @@ SOFTWARE.
 namespace monkero
 {
 
-class ecs;
+class scene;
 
 /** A built-in event emitted when a component is added to the ECS. */
 template<typename Component>
@@ -39,7 +39,7 @@ struct add_component
 };
 
 /** A built-in event emitted when a component is removed from the ECS.
- * The destructor of class ecs will emit remove_component events for all
+ * The destructor of class scene will emit remove_component events for all
  * components still left at that point.
  */
 template<typename Component>
@@ -57,9 +57,9 @@ struct remove_component
  */
 class event_subscription
 {
-friend class ecs;
+friend class scene;
 public:
-    inline event_subscription(ecs* ctx = nullptr, std::size_t subscription_id = 0);
+    inline event_subscription(scene* ctx = nullptr, std::size_t subscription_id = 0);
     inline explicit event_subscription(event_subscription&& other);
     event_subscription(const event_subscription& other) = delete;
     inline ~event_subscription();
@@ -68,7 +68,7 @@ public:
     event_subscription& operator=(const event_subscription& other) = delete;
 
 private:
-    ecs* ctx;
+    scene* ctx;
     std::size_t subscription_id;
 };
 
@@ -85,7 +85,7 @@ public:
      * \param ctx The ECS this receiver is part of.
      * \param event The event that occurred.
      */
-    virtual void handle(ecs& ctx, const EventType& event) = 0;
+    virtual void handle(scene& ctx, const EventType& event) = 0;
 };
 
 /** Deriving from this class allows systems to receive events of the specified
@@ -96,7 +96,7 @@ public:
 template<typename... ReceiveEvents>
 class receiver: public event_receiver<ReceiveEvents>...
 {
-friend class ecs;
+friend class scene;
 private:
     event_subscription sub;
 };

@@ -27,7 +27,7 @@ SOFTWARE.
 
 namespace monkero
 {
-class ecs;
+class scene;
 
 /** Specializing this class for your component type and implementing the given
  * functions allows for accelerated entity searching based on any parameter you
@@ -60,7 +60,7 @@ public:
      * that the user must call that then calls this.
      * \param e the ECS context.
      */
-    void update(ecs& e);
+    void update(scene& e);
 
     // Don't copy this one though, or else you won't get some add_entity or
     // remove_entity calls.

@@ -46,7 +46,7 @@ template<typename Component>
 void search_index<Component>::add_entity(entity, const Component&) {}
 
 template<typename Component>
-void search_index<Component>::update(ecs&) {}
+void search_index<Component>::update(scene&) {}
 
 template<typename Component>
 void search_index<Component>::remove_entity(entity, const Component&) {}

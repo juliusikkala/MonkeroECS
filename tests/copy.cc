@@ -16,8 +16,8 @@ struct test_component_uncopiable
 
 int main()
 {
-    ecs secondary;
-    ecs primary;
+    scene secondary;
+    scene primary;
 
     std::vector<entity> ids;
     for(int i = 0; i < 10000; ++i)

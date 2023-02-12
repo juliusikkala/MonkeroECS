@@ -29,12 +29,12 @@ SOFTWARE.
 namespace monkero
 {
 
-ecs::ecs()
+scene::scene()
 : id_counter(1), subscriber_counter(0), defer_batch(0)
 {
 }
 
-ecs::~ecs()
+scene::~scene()
 {
     // This is called manually so that remove events are fired if necessary.
     clear_entities();
@@ -42,7 +42,7 @@ ecs::~ecs()
 
 template<bool pass_id, typename... Components>
 template<typename Component>
-struct ecs::foreach_impl<pass_id, Components...>::iterator_wrapper<Component*>
+struct scene::foreach_impl<pass_id, Components...>::iterator_wrapper<Component*>
 {
     static constexpr bool required = false;
     typename component_container<std::decay_t<std::remove_pointer_t<std::decay_t<Component>>>>::iterator iter;
@@ -50,7 +50,7 @@ struct ecs::foreach_impl<pass_id, Components...>::iterator_wrapper<Component*>
 
 template<bool pass_id, typename... Components>
 template<typename F>
-void ecs::foreach_impl<pass_id, Components...>::foreach(ecs& ctx, F&& f)
+void scene::foreach_impl<pass_id, Components...>::foreach(scene& ctx, F&& f)
 {
     ctx.start_batch();
 
@@ -132,7 +132,7 @@ void ecs::foreach_impl<pass_id, Components...>::foreach(ecs& ctx, F&& f)
 
 template<bool pass_id, typename... Components>
 template<typename Component>
-struct ecs::foreach_impl<pass_id, Components...>::converter<Component*>
+struct scene::foreach_impl<pass_id, Components...>::converter<Component*>
 {
     template<typename T>
     static inline T* convert(T* val) { return val; }
@@ -141,14 +141,14 @@ struct ecs::foreach_impl<pass_id, Components...>::converter<Component*>
 template<bool pass_id, typename... Components>
 template<typename Component>
 template<typename T>
-T& ecs::foreach_impl<pass_id, Components...>::converter<Component>::convert(T* val)
+T& scene::foreach_impl<pass_id, Components...>::converter<Component>::convert(T* val)
 {
     return *val;
 }
 
 template<bool pass_id, typename... Components>
 template<typename F>
-void ecs::foreach_impl<pass_id, Components...>::call(
+void scene::foreach_impl<pass_id, Components...>::call(
     F&& f,
     entity id,
     std::decay_t<std::remove_pointer_t<std::decay_t<Components>>>*... args
@@ -164,12 +164,12 @@ template<typename T>
 struct has_ensure_dependency_components_exist<
     T,
     decltype((void)
-        T::ensure_dependency_components_exist(entity(), *(ecs*)nullptr), void()
+        T::ensure_dependency_components_exist(entity(), *(scene*)nullptr), void()
     )
 > : std::true_type { };
 
 template<typename Component>
-void ecs::try_attach_dependencies(entity id)
+void scene::try_attach_dependencies(entity id)
 {
     (void)id;
     if constexpr(has_ensure_dependency_components_exist<Component>::value)
@@ -177,7 +177,7 @@ void ecs::try_attach_dependencies(entity id)
 }
 
 template<typename F>
-void ecs::foreach(F&& f)
+void scene::foreach(F&& f)
 {
     // This one little trick lets us know the argument types without
     // actually using the std::function wrapper at runtime!
@@ -187,12 +187,12 @@ void ecs::foreach(F&& f)
 }
 
 template<typename F>
-void ecs::operator()(F&& f)
+void scene::operator()(F&& f)
 {
     foreach(std::forward<F>(f));
 }
 
-entity ecs::add()
+entity scene::add()
 {
     if(reusable_ids.size() > 0)
     {
@@ -209,7 +209,7 @@ entity ecs::add()
 }
 
 template<typename... Components>
-entity ecs::add(Components&&... components)
+entity scene::add(Components&&... components)
 {
     entity id = add();
     attach(id, std::forward<Components>(components)...);
@@ -217,7 +217,7 @@ entity ecs::add(Components&&... components)
 }
 
 template<typename Component, typename... Args>
-void ecs::emplace(entity id, Args&&... args)
+void scene::emplace(entity id, Args&&... args)
 {
     try_attach_dependencies<Component>(id);
 
@@ -227,7 +227,7 @@ void ecs::emplace(entity id, Args&&... args)
 }
 
 template<typename... Components>
-void ecs::attach(entity id, Components&&... components)
+void scene::attach(entity id, Components&&... components)
 {
     (try_attach_dependencies<Components>(id), ...);
 
@@ -238,7 +238,7 @@ void ecs::attach(entity id, Components&&... components)
     );
 }
 
-void ecs::remove(entity id)
+void scene::remove(entity id)
 {
     for(auto& c: components)
         if(c) c->erase(id);
@@ -249,12 +249,12 @@ void ecs::remove(entity id)
 }
 
 template<typename Component>
-void ecs::remove(entity id)
+void scene::remove(entity id)
 {
     get_container<Component>().erase(id);
 }
 
-void ecs::clear_entities()
+void scene::clear_entities()
 {
     for(auto& c: components)
         if(c) c->clear();
@@ -267,8 +267,8 @@ void ecs::clear_entities()
     }
 }
 
-void ecs::concat(
-    ecs& other,
+void scene::concat(
+    scene& other,
     std::map<entity, entity>* translation_table_ptr
 ){
     std::map<entity, entity> translation_table;
@@ -288,7 +288,7 @@ void ecs::concat(
         *translation_table_ptr = std::move(translation_table);
 }
 
-entity ecs::copy(ecs& other, entity other_id)
+entity scene::copy(scene& other, entity other_id)
 {
     entity id = add();
 
@@ -298,7 +298,7 @@ entity ecs::copy(ecs& other, entity other_id)
     return id;
 }
 
-void ecs::start_batch()
+void scene::start_batch()
 {
     ++defer_batch;
     if(defer_batch == 1)
@@ -308,7 +308,7 @@ void ecs::start_batch()
     }
 }
 
-void ecs::finish_batch()
+void scene::finish_batch()
 {
     if(defer_batch > 0)
     {
@@ -329,31 +329,31 @@ void ecs::finish_batch()
 }
 
 template<typename Component>
-size_t ecs::count() const
+size_t scene::count() const
 {
     return get_container<Component>().size();
 }
 
 template<typename Component>
-bool ecs::has(entity id) const
+bool scene::has(entity id) const
 {
     return get_container<Component>().contains(id);
 }
 
 template<typename Component>
-const Component* ecs::get(entity id) const
+const Component* scene::get(entity id) const
 {
     return get_container<Component>()[id];
 }
 
 template<typename Component>
-Component* ecs::get(entity id)
+Component* scene::get(entity id)
 {
     return get_container<Component>()[id];
 }
 
 template<typename Component, typename... Args>
-Component* ecs::find_component(Args&&... args)
+Component* scene::find_component(Args&&... args)
 {
     return get<Component>(
         find<Component>(std::forward<Args>(args)...)
@@ -361,7 +361,7 @@ Component* ecs::find_component(Args&&... args)
 }
 
 template<typename Component, typename... Args>
-const Component* ecs::find_component(Args&&... args) const
+const Component* scene::find_component(Args&&... args) const
 {
     return get<Component>(
         find<Component>(std::forward<Args>(args)...)
@@ -369,25 +369,25 @@ const Component* ecs::find_component(Args&&... args) const
 }
 
 template<typename Component, typename... Args>
-entity ecs::find(Args&&... args) const
+entity scene::find(Args&&... args) const
 {
     return get_container<Component>().find_entity(std::forward<Args>(args)...);
 }
 
 template<typename Component>
-void ecs::update_search_index()
+void scene::update_search_index()
 {
     return get_container<Component>().update_search_index();
 }
 
-void ecs::update_search_indices()
+void scene::update_search_indices()
 {
     for(auto& c: components)
         if(c) c->update_search_index();
 }
 
 template<typename EventType>
-void ecs::emit(const EventType& event)
+void scene::emit(const EventType& event)
 {
     size_t key = get_event_type_key<EventType>();
     if(event_handlers.size() <= key) return;
@@ -397,7 +397,7 @@ void ecs::emit(const EventType& event)
 }
 
 template<typename EventType>
-size_t ecs::get_handler_count() const
+size_t scene::get_handler_count() const
 {
     size_t key = get_event_type_key<EventType>();
     if(event_handlers.size() <= key) return 0;
@@ -405,7 +405,7 @@ size_t ecs::get_handler_count() const
 }
 
 template<typename... F>
-size_t ecs::add_event_handler(F&&... callbacks)
+size_t scene::add_event_handler(F&&... callbacks)
 {
     size_t id = subscriber_counter++;
     (internal_add_handler(id, std::forward<F>(callbacks)), ...);
@@ -413,14 +413,14 @@ size_t ecs::add_event_handler(F&&... callbacks)
 }
 
 template<class T, typename... F>
-size_t ecs::bind_event_handler(T* userdata, F&&... callbacks)
+size_t scene::bind_event_handler(T* userdata, F&&... callbacks)
 {
     size_t id = subscriber_counter++;
     (internal_bind_handler(id, userdata, std::forward<F>(callbacks)), ...);
     return id;
 }
 
-void ecs::remove_event_handler(size_t id)
+void scene::remove_event_handler(size_t id)
 {
     for(std::vector<event_handler>& type_event_handlers: event_handlers)
     {
@@ -439,7 +439,7 @@ void ecs::remove_event_handler(size_t id)
 }
 
 template<typename... F>
-event_subscription ecs::subscribe(F&&... callbacks)
+event_subscription scene::subscribe(F&&... callbacks)
 {
     return event_subscription(
         this, add_event_handler(std::forward<F>(callbacks)...)
@@ -447,7 +447,7 @@ event_subscription ecs::subscribe(F&&... callbacks)
 }
 
 template<typename... EventTypes>
-void ecs::add_receiver(receiver<EventTypes...>& r)
+void scene::add_receiver(receiver<EventTypes...>& r)
 {
     r.sub.ctx = this;
     r.sub.subscription_id = bind_event_handler(
@@ -456,14 +456,14 @@ void ecs::add_receiver(receiver<EventTypes...>& r)
 }
 
 template<typename Component>
-component_container<Component>& ecs::get_container() const
+component_container<Component>& scene::get_container() const
 {
     size_t key = get_component_type_key<Component>();
     if(components.size() <= key) components.resize(key+1);
     auto& base_ptr = components[key];
     if(!base_ptr)
     {
-        base_ptr.reset(new component_container<Component>(*const_cast<ecs*>(this)));
+        base_ptr.reset(new component_container<Component>(*const_cast<scene*>(this)));
         if(defer_batch > 0)
             base_ptr->start_batch();
     }
@@ -471,21 +471,21 @@ component_container<Component>& ecs::get_container() const
 }
 
 template<typename Component>
-size_t ecs::get_component_type_key()
+size_t scene::get_component_type_key()
 {
     static size_t key = component_type_key_counter++;
     return key;
 }
 
 template<typename Event>
-size_t ecs::get_event_type_key()
+size_t scene::get_event_type_key()
 {
     static size_t key = event_type_key_counter++;
     return key;
 }
 
 template<typename F>
-void ecs::internal_add_handler(size_t id, F&& f)
+void scene::internal_add_handler(size_t id, F&& f)
 {
     using T = decltype(event_handler_type_detector(f));
     size_t key = get_event_type_key<T>();
@@ -493,14 +493,14 @@ void ecs::internal_add_handler(size_t id, F&& f)
 
     event_handler h;
     h.subscription_id = id;
-    h.callback = [f = std::forward<F>(f)](ecs& ctx, const void* ptr){
+    h.callback = [f = std::forward<F>(f)](scene& ctx, const void* ptr){
         f(ctx, *(const T*)ptr);
     };
     event_handlers[key].push_back(std::move(h));
 }
 
 template<class C, typename F>
-void ecs::internal_bind_handler(size_t id, C* c, F&& f)
+void scene::internal_bind_handler(size_t id, C* c, F&& f)
 {
     using T = decltype(event_handler_type_detector(f));
 
@@ -509,7 +509,7 @@ void ecs::internal_bind_handler(size_t id, C* c, F&& f)
 
     event_handler h;
     h.subscription_id = id;
-    h.callback = [c = c, f = std::forward<F>(f)](ecs& ctx, const void* ptr){
+    h.callback = [c = c, f = std::forward<F>(f)](scene& ctx, const void* ptr){
         ((*c).*f)(ctx, *(const T*)ptr);
     };
     event_handlers[key].push_back(std::move(h));
@@ -517,7 +517,7 @@ void ecs::internal_bind_handler(size_t id, C* c, F&& f)
 
 template<typename... DependencyComponents>
 void dependency_components<DependencyComponents...>::
-ensure_dependency_components_exist(entity id, ecs& ctx)
+ensure_dependency_components_exist(entity id, scene& ctx)
 {
     ((ctx.has<DependencyComponents>(id) ? void() : ctx.attach(id, DependencyComponents())), ...);
 }

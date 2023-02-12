@@ -10,7 +10,7 @@ struct test_component_ptr { test_component_ptr(int a = 123): a(a) {} int a; };
 
 int main()
 {
-    ecs e;
+    scene e;
 
     // Initialize some data for us
     constexpr size_t N = 1000000;

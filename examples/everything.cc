@@ -55,14 +55,14 @@ class mysystem: public monkero::receiver<myevent>
 public:
     // Each event type listed in receiver must have a corresponding handler.
     // This is called when any system emits this event type.
-    void handle(monkero::ecs& ecs, const myevent& ev)
+    void handle(monkero::scene& ecs, const myevent& ev)
     {
         // This sends an event to all interested systems.
         // You can only emit types that you have listed in emitter.
         ecs.emit(ev.thishappened > 3 ? COOL_EVENT : UNCOOL_EVENT);
     }
 
-    void callme(monkero::ecs& ecs)
+    void callme(monkero::scene& ecs)
     {
         // You can iterate entities in the ECS by calling the object itself or
         // using ecs::foreach (they're equivalent). You would usually give it a
@@ -108,7 +108,7 @@ class tagtracker:
     >
 {
 public:
-    void handle(monkero::ecs& ecs, const monkero::add_component<tagcomponent>& ev)
+    void handle(monkero::scene& ecs, const monkero::add_component<tagcomponent>& ev)
     {
         // ev->id contains the id of the entity that got this component.
         // ev->data would have a pointer to the component data, but our
@@ -116,7 +116,7 @@ public:
         tags++;
     }
 
-    void handle(monkero::ecs& ecs, const monkero::remove_component<tagcomponent>& ev)
+    void handle(monkero::scene& ecs, const monkero::remove_component<tagcomponent>& ev)
     {
         tags--;
     }
@@ -128,7 +128,7 @@ private:
 
 int main()
 {
-    monkero::ecs ecs;
+    monkero::scene ecs;
 
     // Let's add a system. This one tracks a specific component type as
     // explained above. It must therefore exist before the entities so that it

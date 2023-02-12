@@ -22,7 +22,7 @@ struct test_component_dependency_normal:
 };
 
 template<typename Component>
-void test_sum(ecs& e, size_t expected)
+void test_sum(scene& e, size_t expected)
 {
     if constexpr(
         !std::is_same_v<Component, test_component_tag> && 
@@ -35,7 +35,7 @@ void test_sum(ecs& e, size_t expected)
 }
 
 template<typename Component>
-void run_tests(ecs& e)
+void run_tests(scene& e)
 {
     constexpr int N = 10000;
     for(int batching = 0; batching <= 1; ++batching)
@@ -174,7 +174,7 @@ void run_tests(ecs& e)
 
 int main()
 {
-    ecs e;
+    scene e;
 
     run_tests<test_component_tag>(e);
     run_tests<test_component_normal>(e);

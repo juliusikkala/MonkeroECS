@@ -23,7 +23,7 @@ struct test_component_normal { int a; };
 struct test_system_1: receiver<test_event_1>
 {
     int sum = 0;
-    void handle(ecs&, const test_event_1& e)
+    void handle(scene&, const test_event_1& e)
     {
         sum += e.count;
     }
@@ -34,12 +34,12 @@ struct test_system_2: receiver<test_event_1, test_event_2>
     int sum = 0;
     double sum_d = 0;
 
-    void handle(ecs&, const test_event_1& e)
+    void handle(scene&, const test_event_1& e)
     {
         sum += e.count;
     }
 
-    void handle(ecs&, const test_event_2& e)
+    void handle(scene&, const test_event_2& e)
     {
         sum_d += e.distance;
     }
@@ -55,28 +55,28 @@ struct lifetime_tester: receiver<
     int normal_count = 0;
     entity expected_id = INVALID_ENTITY;
 
-    void handle(ecs&, const add_component<test_component_tag>& e) override
+    void handle(scene&, const add_component<test_component_tag>& e) override
     {
         tag_count++;
         test(e.id == expected_id);
         test(e.data != nullptr);
     }
 
-    void handle(ecs&, const add_component<test_component_normal>& e) override
+    void handle(scene&, const add_component<test_component_normal>& e) override
     {
         normal_count++;
         test(e.id == expected_id);
         test(e.data != nullptr);
     }
 
-    void handle(ecs&, const remove_component<test_component_tag>& e) override
+    void handle(scene&, const remove_component<test_component_tag>& e) override
     {
         tag_count--;
         test(e.id == expected_id);
         test(e.data != nullptr);
     }
 
-    void handle(ecs&, const remove_component<test_component_normal>& e) override
+    void handle(scene&, const remove_component<test_component_normal>& e) override
     {
         normal_count--;
         test(e.id == expected_id);
@@ -86,14 +86,14 @@ struct lifetime_tester: receiver<
 
 
 int something_count = 0;
-void handle_event_3(ecs&, const test_event_3& e)
+void handle_event_3(scene&, const test_event_3& e)
 {
     something_count += e.something;
 }
 
 int main()
 {
-    ecs e;
+    scene e;
 
     // Emit without any listeners
     e.emit(test_event_1{1024});

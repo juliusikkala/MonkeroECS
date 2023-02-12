@@ -14,7 +14,7 @@ struct dead {};
 class aging_system
 {
 public:
-    void step(monkero::ecs& ecs)
+    void step(monkero::scene& ecs)
     {
         ecs([&](monkero::entity id, age& a, alive&){
             a.years++;
@@ -30,7 +30,7 @@ public:
 class breeding_system
 {
 public:
-    void step(monkero::ecs& ecs)
+    void step(monkero::scene& ecs)
     {
         ecs([&](const age& a, alive&){
             if(a.years >= 20 && a.years < 40 && rand()%10 == 0)
@@ -43,7 +43,7 @@ public:
 
 int main()
 {
-    monkero::ecs ecs;
+    monkero::scene ecs;
 
     // Seed the random (not related to MonkeroECS, just game logic)
     srand(0);

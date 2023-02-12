@@ -2,7 +2,7 @@
 
 int main()
 {
-    ecs e;
+    scene e;
 
     // Add so many entities that we reach the error state
     for(uint64_t i = 0; i < std::numeric_limits<entity>::max(); ++i)

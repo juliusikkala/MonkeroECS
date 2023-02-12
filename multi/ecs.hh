@@ -65,17 +65,17 @@ namespace monkero
  * Entities are created by it, components are attached throught it and events
  * are routed through it.
  */
-class ecs
+class scene
 {
 friend class event_subscription;
 public:
     /** The constructor. */
-    inline ecs();
+    inline scene();
     /** The destructor.
      * It ensures that all remove_component events are sent for the remainder
      * of the components before event handlers are cleared.
      */
-    inline ~ecs();
+    inline ~scene();
 
     /** Calls a given function for all suitable entities.
      * The parameters of the function mandate how it is called. Batching is
@@ -157,7 +157,7 @@ public:
      * \warn You should finish batching on the other ECS before calling this.
      */
     inline void concat(
-        ecs& other,
+        scene& other,
         std::map<entity, entity>* translation_table = nullptr
     );
 
@@ -167,7 +167,7 @@ public:
      * \return entity ID of the created entity.
      * \warn You should finish batching on the other ECS before calling this.
      */
-    inline entity copy(ecs& other, entity other_id);
+    inline entity copy(scene& other, entity other_id);
 
     /** Starts batching behaviour for add/remove.
      * Batching allows you to safely add and remove components while you iterate
@@ -267,7 +267,7 @@ public:
     size_t get_handler_count() const;
 
     /** Adds event handler(s) to the ECS.
-     * \tparam F Callable types, with signature void(ecs& ctx, const EventType& e).
+     * \tparam F Callable types, with signature void(scene& ctx, const EventType& e).
      * \param callbacks The event handler callbacks.
      * \return ID of the "subscription"
      * \see subscribe() for RAII handler lifetime.
@@ -279,7 +279,7 @@ public:
     /** Adds member functions of an object as event handler(s) to the ECS.
      * \tparam T Type of the object whose members are being bound.
      * \tparam F Member function types, with signature
-     * void(ecs& ctx, const EventType& e).
+     * void(scene& ctx, const EventType& e).
      * \param userdata The class to bind to each callback.
      * \param callbacks The event handler callbacks.
      * \return ID of the "subscription"
@@ -303,7 +303,7 @@ public:
     void add_receiver(receiver<EventTypes...>& r);
 
     /** Adds event handlers with a subscription object that tracks lifetime.
-     * \tparam F Callable types, with signature void(ecs& ctx, const EventType& e).
+     * \tparam F Callable types, with signature void(scene& ctx, const EventType& e).
      * \param callbacks The event handler callbacks.
      * \return The subscription object that removes the event handler on its
      * destruction.
@@ -316,7 +316,7 @@ private:
     struct foreach_impl
     {
         template<typename F>
-        static void foreach(ecs& ctx, F&& f);
+        static void foreach(scene& ctx, F&& f);
 
         template<typename Component>
         struct iterator_wrapper
@@ -326,7 +326,7 @@ private:
         };
 
         template<typename Component>
-        static inline auto make_iterator(ecs& ctx)
+        static inline auto make_iterator(scene& ctx)
         {
             return iterator_wrapper<Component>{
                 ctx.get_container<std::decay_t<std::remove_pointer_t<std::decay_t<Component>>>>().begin()
@@ -357,13 +357,13 @@ private:
     foreach_redirector(const std::function<void(Components...)>&);
 
     template<typename T>
-    T event_handler_type_detector(const std::function<void(ecs&, const T&)>&);
+    T event_handler_type_detector(const std::function<void(scene&, const T&)>&);
 
     template<typename T>
-    T event_handler_type_detector(void (*)(ecs&, const T&));
+    T event_handler_type_detector(void (*)(scene&, const T&));
 
     template<typename T, typename U>
-    U event_handler_type_detector(void (T::*)(ecs&, const U&));
+    U event_handler_type_detector(void (T::*)(scene&, const U&));
 
     template<typename Component>
     void try_attach_dependencies(entity id);
@@ -399,7 +399,7 @@ private:
         // TODO: Once we have std::function_ref, see if this can be optimized.
         // The main difficulty we have to handle are pointers to member
         // functions, which have been made unnecessarily unusable in C++.
-        std::function<void(ecs& ctx, const void* event)> callback;
+        std::function<void(scene& ctx, const void* event)> callback;
     };
     std::vector<std::vector<event_handler>> event_handlers;
 };
@@ -411,9 +411,9 @@ private:
 template<typename... DependencyComponents>
 class dependency_components
 {
-friend class ecs;
+friend class scene;
 public:
-    static void ensure_dependency_components_exist(entity id, ecs& ctx);
+    static void ensure_dependency_components_exist(entity id, scene& ctx);
 };
 
 }

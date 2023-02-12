@@ -14,8 +14,8 @@ struct test_component_uncopiable
 
 int main()
 {
-    ecs secondary;
-    ecs primary;
+    scene secondary;
+    scene primary;
 
     for(int i = 0; i < 10000; ++i)
     {

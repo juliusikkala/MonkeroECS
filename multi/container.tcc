@@ -35,7 +35,7 @@ namespace monkero
 {
 
 template<typename T>
-component_container<T>::component_container(ecs& ctx)
+component_container<T>::component_container(scene& ctx)
 :   entity_count(0), bucket_count(0),
     bucket_bitmask(nullptr), top_bitmask(nullptr),
     bucket_jump_table(nullptr), bucket_components(nullptr), batching(false),
@@ -333,7 +333,7 @@ void component_container<T>::list_entities(
 
 template<typename T>
 void component_container<T>::concat(
-    ecs& target,
+    scene& target,
     const std::map<entity, entity>& translation_table
 ){
     if constexpr(std::is_copy_constructible_v<T>)
@@ -348,7 +348,7 @@ void component_container<T>::concat(
 
 template<typename T>
 void component_container<T>::copy(
-    ecs& target,
+    scene& target,
     entity result_id,
     entity original_id
 ){

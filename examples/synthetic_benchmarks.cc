@@ -1,5 +1,4 @@
 #include "ecs.hh"
-//#include "../monkeroecs.hh"
 #include <iostream>
 #include <cstdlib>
 #include <chrono>
@@ -20,7 +19,7 @@ struct tag {};
 
 void test_random_access()
 {
-    monkero::ecs ecs;
+    monkero::scene ecs;
     std::default_random_engine rng(0);
     std::uniform_int_distribution<int> dist(0, 10);
 
@@ -82,7 +81,7 @@ void test_random_access()
 
 void test_iteration()
 {
-    monkero::ecs ecs;
+    monkero::scene ecs;
     std::default_random_engine rng(0);
     std::uniform_int_distribution<int> dist1(0, 1);
     std::uniform_int_distribution<int> dist2(0, 1000);

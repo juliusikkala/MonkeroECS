@@ -72,20 +72,20 @@ struct hit_event
 class health_system: public monkero::receiver<hit_event>
 {
 public:
-    void handle(monkero::ecs& ecs, const hit_event& e)
+    void handle(monkero::scene& s, const hit_event& e)
     {
-        ecs.get<health>(e.damaged_entity)->hit_points -= e.damage;
+        s.get<health>(e.damaged_entity)->hit_points -= e.damage;
     }
 };
 
 class poison_gas_system
 {
 public:
-    void tick(monkero::ecs& ecs)
+    void tick(monkero::scene& s)
     {
         // Iterate all entities with health component
-        ecs([&](monkero::entity id, health&){
-            ecs.emit(hit_event{id, 10});
+        s([&](monkero::entity id, health&){
+            s.emit(hit_event{id, 10});
         });
     }
 };
@@ -93,21 +93,21 @@ public:
 
 4. Add entities, components and systems to the ECS!
 ```cpp
-monkero::ecs ecs;
+monkero::scene s;
 
 health_system hs;
-ecs.add_receiver(hs);
+s.add_receiver(hs);
 poison_gas_system gas;
 
 // Adds entity with component health
-ecs.add(health{30});
-ecs.add(health{40});
-ecs.add(health{50});
+s.add(health{30});
+s.add(health{40});
+s.add(health{50});
 
 while(main_loop)
 {
     //...
-    gas.tick(ecs);
+    gas.tick(s);
     //...
 }
 ```

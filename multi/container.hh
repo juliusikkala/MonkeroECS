@@ -36,7 +36,7 @@ SOFTWARE.
 namespace monkero
 {
 
-class ecs;
+class scene;
 
 template<typename T, typename=void>
 struct has_bucket_exp_hint: std::false_type { };
@@ -93,11 +93,11 @@ public:
         std::map<entity, entity>& translation_table
     ) = 0;
     inline virtual void concat(
-        ecs& target,
+        scene& target,
         const std::map<entity, entity>& translation_table
     ) = 0;
     inline virtual void copy(
-        ecs& target,
+        scene& target,
         entity result_id,
         entity original_id
     ) = 0;
@@ -132,7 +132,7 @@ public:
     static constexpr std::uint32_t bucket_bitmask_units =
         std::max(1u, (1u<<bucket_exp)>>bitmask_shift);
 
-    component_container(ecs& ctx);
+    component_container(scene& ctx);
     component_container(component_container&& other) = delete;
     component_container(const component_container& other) = delete;
     ~component_container();
@@ -198,11 +198,11 @@ public:
         std::map<entity, entity>& translation_table
     ) override;
     void concat(
-        ecs& target,
+        scene& target,
         const std::map<entity, entity>& translation_table
     ) override;
     void copy(
-        ecs& target,
+        scene& target,
         entity result_id,
         entity original_id
     ) override;
@@ -269,7 +269,7 @@ private:
     bitmask_type** bucket_batch_bitmask;
 
     // Search index (kinda separate, but handy to keep around here.)
-    ecs* ctx;
+    scene* ctx;
     search_index<T> search;
 };
 

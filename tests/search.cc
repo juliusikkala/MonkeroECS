@@ -37,7 +37,7 @@ public:
         remove_count++;
     }
 
-    void update(ecs& e)
+    void update(scene& e)
     {
         for(auto& pair: name_to_id)
         {
@@ -59,7 +59,7 @@ private:
 int main()
 {
     {
-        ecs e;
+        scene e;
 
         entity monkero = e.add(test_component{"Monkero"});
         entity tankero = e.add(test_component{"Tankero"});
