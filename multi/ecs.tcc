@@ -304,7 +304,7 @@ void ecs::start_batch()
     if(defer_batch == 1)
     {
         for(auto& c: components)
-            c->start_batch();
+            if(c) c->start_batch();
     }
 }
 
@@ -316,7 +316,7 @@ void ecs::finish_batch()
         if(defer_batch == 0)
         {
             for(auto& c: components)
-                c->finish_batch();
+                if(c) c->finish_batch();
 
             reusable_ids.insert(
                 reusable_ids.end(),

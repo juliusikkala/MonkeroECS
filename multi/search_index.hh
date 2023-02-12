@@ -46,9 +46,6 @@ public:
     /** Called automatically when an entity of this component type is added.
      * \param id ID of the entity whose component is being added.
      * \param data the component data itself.
-     * \warn Don't save a pointer to the data unless the component derives from
-     *  ptr_component, otherwise the address can change without notification to
-     *  you.
      */
     void add_entity(entity id, const Component& data);
 

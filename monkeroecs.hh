@@ -171,9 +171,6 @@ public:
     /** Called automatically when an entity of this component type is added.
      * \param id ID of the entity whose component is being added.
      * \param data the component data itself.
-     * \warn Don't save a pointer to the data unless the component derives from
-     *  ptr_component, otherwise the address can change without notification to
-     *  you.
      */
     void add_entity(entity id, const Component& data);
 
@@ -2281,7 +2278,7 @@ void ecs::start_batch()
     if(defer_batch == 1)
     {
         for(auto& c: components)
-            c->start_batch();
+            if(c) c->start_batch();
     }
 }
 
@@ -2293,7 +2290,7 @@ void ecs::finish_batch()
         if(defer_batch == 0)
         {
             for(auto& c: components)
-                c->finish_batch();
+                if(c) c->finish_batch();
 
             reusable_ids.insert(
                 reusable_ids.end(),
