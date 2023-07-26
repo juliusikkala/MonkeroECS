@@ -440,6 +440,7 @@ void component_container<T>::jump_table_insert(entity id)
     entity prev_start_id = find_previous_entity(id);
     std::uint32_t prev_start_hi = prev_start_id >> bucket_exp;
     std::uint32_t prev_start_lo = prev_start_id & bucket_mask;
+    ensure_jump_table(prev_start_hi);
     entity& prev_start = bucket_jump_table[prev_start_hi][prev_start_lo];
 
     if(prev_start_id + 1 < id)
