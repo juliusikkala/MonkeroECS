@@ -2,7 +2,8 @@ MonkeroECS
 ==========
 
 A compact header-only, C++17 ECS (Entity Component System) gutted from a game
-engine project.
+engine project. I consider it feature-complete, so active development is sparse
+and limited to bug fixes.
 
 Features:
 - No entity count limits (other than 32-bit entity index)
