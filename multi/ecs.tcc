@@ -487,7 +487,7 @@ size_t scene::get_event_type_key()
 template<typename F>
 void scene::internal_add_handler(size_t id, F&& f)
 {
-    using T = decltype(event_handler_type_detector(f));
+    using T = decltype(event_handler_type_detector(std::function(f)));
     size_t key = get_event_type_key<T>();
     if(event_handlers.size() <= key) event_handlers.resize(key+1);
 
