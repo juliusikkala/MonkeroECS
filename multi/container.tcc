@@ -242,7 +242,7 @@ void component_container<T>::finish_batch()
         entity& id = batch_checklist[ri];
         entity hi = id >> bucket_exp;
         entity lo = id & bucket_mask;
-        bitmask_type bit = 1lu<<(lo&bitmask_mask);
+        bitmask_type bit = std::uint64_t(1)<<(lo&bitmask_mask);
         bitmask_type* bbit = bucket_batch_bitmask[hi];
         if(bbit && (bbit[lo>>bitmask_shift] & bit))
         { // Not a dupe, but latest state.
@@ -260,7 +260,7 @@ void component_container<T>::finish_batch()
 
         entity hi = id >> bucket_exp;
         entity lo = id & bucket_mask;
-        bitmask_type bit = 1lu<<(lo&bitmask_mask);
+        bitmask_type bit = std::uint64_t(1)<<(lo&bitmask_mask);
         if(bucket_bitmask[hi] && (bucket_bitmask[hi][lo>>bitmask_shift] & bit))
         { // Erase
             bitmask_erase(id);
@@ -531,8 +531,8 @@ void component_container<T>::bitmask_insert(entity id)
     ensure_bitmask(hi);
     bitmask_type& mask = bucket_bitmask[hi][lo>>bitmask_shift];
     if(mask == 0)
-        top_bitmask[hi>>bitmask_shift] |= 1lu<<(hi&bitmask_mask);
-    mask |= 1lu<<(lo&bitmask_mask);
+        top_bitmask[hi>>bitmask_shift] |= std::uint64_t(1)<<(hi&bitmask_mask);
+    mask |= std::uint64_t(1)<<(lo&bitmask_mask);
 }
 
 template<typename T>
@@ -540,10 +540,10 @@ bool component_container<T>::bitmask_erase(entity id)
 {
     std::uint32_t hi = id >> bucket_exp;
     std::uint32_t lo = id & bucket_mask;
-    bucket_bitmask[hi][lo>>bitmask_shift] &= ~(1lu<<(lo&bitmask_mask));
+    bucket_bitmask[hi][lo>>bitmask_shift] &= ~(std::uint64_t(1)<<(lo&bitmask_mask));
     if(bucket_bitmask[hi][lo>>bitmask_shift] == 0 && bitmask_empty(hi))
     {
-        top_bitmask[hi>>bitmask_shift] &= ~(1lu<<(hi&bitmask_mask));
+        top_bitmask[hi>>bitmask_shift] &= ~(std::uint64_t(1)<<(hi&bitmask_mask));
         return true;
     }
     return false;
@@ -749,7 +749,7 @@ bool component_container<T>::batch_change(entity id)
         );
     }
     bitmask_type& mask = bucket_batch_bitmask[hi][lo>>bitmask_shift];
-    bitmask_type bit = 1lu<<(lo&bitmask_mask);
+    bitmask_type bit = std::uint64_t(1)<<(lo&bitmask_mask);
     mask ^= bit;
     if(mask & bit)
     { // If there will be a change, add this to the list.
@@ -872,7 +872,7 @@ bool component_container<T>::find_bitmask_previous_index(
         return false;
 
     std::uint32_t bm_index = index >> bitmask_shift;
-    bitmask_type bm_mask = (1lu<<(index&bitmask_mask))-1;
+    bitmask_type bm_mask = (std::uint64_t(1)<<(index&bitmask_mask))-1;
     bitmask_type cur_mask = bitmask[bm_index] & bm_mask;
     if(cur_mask != 0)
     {
@@ -996,7 +996,7 @@ bool component_container<T>::iterator::try_advance(entity id)
         id < current_entity ||
         next_bucket >= from->bucket_count ||
         !from->bucket_bitmask[next_bucket] ||
-        !(from->bucket_bitmask[next_bucket][lo>>bitmask_shift] & (1lu << (lo&bitmask_mask)))
+        !(from->bucket_bitmask[next_bucket][lo>>bitmask_shift] & (std::uint64_t(1) << (lo&bitmask_mask)))
     ) return false;
 
     current_entity = id;

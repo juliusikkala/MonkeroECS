@@ -71,7 +71,7 @@ struct component_bucket_exp_hint
         {
             uint32_t i = 6;
             // Aim for 65kb buckets
-            while((std::max(sizeof(T), 4lu)<<i) < 65536lu)
+            while((std::max(sizeof(T), std::uint64_t(4))<<i) < std::uint64_t(65536))
                 ++i;
             return i;
         }
